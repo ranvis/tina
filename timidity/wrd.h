@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifndef ___WRD_H_
@@ -27,10 +25,10 @@
 #define WRD_MAXPARAM 32
 #define WRD_MAXFADESTEP 12
 
-#define WRD_GSCR_WIDTH 640	/* Graphics screen width */
-#define WRD_GSCR_HEIGHT 400	/* Graphics screen height */
-#define WRD_TSCR_WIDTH 80	/* Text screen width */
-#define WRD_TSCR_HEIGHT 50	/* Text screen height */
+#define WRD_GSCR_WIDTH 640	/* Graphics screen width in pixel */
+#define WRD_GSCR_HEIGHT 400	/* Graphics screen height in pixcel */
+#define WRD_TSCR_WIDTH 80	/* Text screen width in character */
+#define WRD_TSCR_HEIGHT 25	/* Text screen height in character */
 
 #define WRD_TEXT_COLOR0 "black"
 #define WRD_TEXT_COLOR1 "red"
@@ -40,6 +38,10 @@
 #define WRD_TEXT_COLOR5 "magenta"
 #define WRD_TEXT_COLOR6 "cyan"
 #define WRD_TEXT_COLOR7 "white"
+
+/*sherry data is little endian*/
+#define SRY_GET_SHORT(charp)  ( (charp)[0]+((charp)[1]<<8) ) 
+
 
 enum wrd_token_type
 {
@@ -71,6 +73,7 @@ enum wrd_token_type
     WRD_PHOPRELOAD,
     WRD_START_SKIP,
     WRD_END_SKIP,
+    WRD_SHERRY_UPDATE,		/* Update real screen of Sherry */
 
     WRD_NOARG = 0x7FFF
 };
@@ -86,16 +89,24 @@ typedef struct _WRDTracer
      */
     int (* open)(char *wrdt_opts);
 
-    /* apply() evaluates WRD command. */
+    /* apply() evaluates MIMPI WRD command. */
     /* wrd_argv[0] means WRD command, and the rests means the arguments */
     void (* apply)(int cmd, int wrd_argc, int wrd_argv[]);
+
+    /* sherry() evaluates Sherry WRD command. */
+    void (* sherry)(uint8 *data, int len);
 
     /* Update window events */
     void (* update_events)(void);
 
-    /* start() calls at each end of MIDI reading */
-    /* wrd_flag is true if WRD file exists */
-    void (* start)(int wrd_flag);
+    /* start() calls at each end of MIDI reading.
+     * If it is error, start() returns -1, otherwise return 0.
+     * If start() returns -1, TiMidity strips all WRD command.
+     */
+    int (* start)(int wrd_mode);
+#define WRD_TRACE_NOTHING	0
+#define WRD_TRACE_MIMPI		1
+#define WRD_TRACE_SHERRY	2
 
     /* end() calls at each end of playing */
     void (* end)(void);
@@ -104,9 +115,16 @@ typedef struct _WRDTracer
     void (* close)(void);
 } WRDTracer;
 
+typedef struct _sry_datapacket
+{
+    int32  len;
+    uint8 *data;
+} sry_datapacket;
+
 extern WRDTracer *wrdt_list[], *wrdt;
 extern int wrd_color_remap[/* 8 */];
 extern int wrd_plane_remap[/* 8 */];
+extern sry_datapacket *datapacket;
 
 extern int import_wrd_file(char *fn);
 extern void wrd_init_path(void);
@@ -115,5 +133,13 @@ extern void wrd_add_default_path(char *path);
 extern struct timidity_file *wrd_open_file(char *filename);
 
 extern void wrd_midi_event(int cmd, int arg);
+extern void wrd_sherry_event(int addr);
+extern void *wrd_sherry_data;
+
+extern void sry_encode_bindata( char *code, const char *org, int len);
+extern int sry_decode_bindata( char *data );
+extern int wrd_read_sherry;
+
+
 
 #endif /* ___WRD_H_ */

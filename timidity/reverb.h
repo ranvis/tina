@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 /*
@@ -31,7 +30,8 @@
 #ifndef ___REVERB_H_
 #define ___REVERB_H_
 
-#define DEFAULT_REVERB_SEND_LEVEL   54
+/* #define DEFAULT_REVERB_SEND_LEVEL   54 */
+#define DEFAULT_REVERB_SEND_LEVEL 40
 
 extern void do_reverb(int32 *, int32);
 extern void do_ch_reverb(int32 *, int32);
@@ -39,6 +39,5 @@ extern void set_ch_reverb(register int32 *, int32, int);
 extern void do_mono_reverb(int32 *, int32);
 extern void init_reverb(int32);
 extern void reverb_rc_event(int, int32);
-extern int do_reverb_flag; /* from command line option */
 
 #endif /* ___REVERB_H_ */

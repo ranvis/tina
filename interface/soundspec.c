@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
@@ -52,11 +50,10 @@
 #define SCOPE_WIDTH  512	/* You can specified any positive value */
 #define SCROLL_THRESHOLD 256	/* 1 <= SCROLL_THRESHOLD <= SCOPE_WIDTH */
 #define NCOLOR    64		/* 1 <= NCOLOR <= 255 */
-/*#define AMP 0.35*/
 #define AMP 1.0
-/*#define AMP 0.27*/
+#define AMP2 1.5
 #define DEFAULT_ZOOM (44100.0/1024.0*2.0) /* ~86Hz */
-#define MIN_ZOOM 15.0	/* 15Hz is lower bound that human can be heard. */
+#define MIN_ZOOM 15.0	/* 15Hz is the lowest bound that human can be heard. */
 #define MAX_ZOOM 440.0
 #define DEFAULT_UPDATE 0.05
 
@@ -75,6 +72,7 @@ static double soundspec_zoom = DEFAULT_ZOOM;
 static Display *disp = NULL;
 static Window win;
 static GC gc;
+static int depth;
 static Pixmap offscr;
 static XImage *img;
 static Atom wm_delete_window;
@@ -161,7 +159,6 @@ static double calc_color_diff(int r1, int g1, int b1,
 
 static long search_near_color(Display *disp, int r, int g, int b)
 {
-    int depth;
     double d, mind;
     int scr;
     static XColor *xc = NULL;
@@ -169,7 +166,6 @@ static long search_near_color(Display *disp, int r, int g, int b)
     long i, k;
 
     scr = DefaultScreen(disp);
-    depth = DefaultDepth(disp, scr);
 
     if(depth == 1)		/* black or white */
     {
@@ -215,6 +211,15 @@ static long search_near_color(Display *disp, int r, int g, int b)
 #endif
 
     return k;
+}
+
+static int highbit(unsigned long ul)
+{
+    int i;  unsigned long hb;
+    hb = 0x80000000UL;
+    for(i = 31; ((ul & hb) == 0) && i >= 0;  i--, ul<<=1)
+	;
+    return i;
 }
 
 static unsigned long AllocRGBColor(
@@ -267,16 +272,34 @@ static void set_color_ring(void)
     }
 }
 
-static void set_draw_pixel(double *val, unsigned char *pixels)
+static void set_draw_pixel(double *val, char *pixels)
 {
     int i;
+    unsigned v;
+
     for(i = 0; i < SCOPE_HEIGHT; i++)
     {
-	unsigned v;
-	v = (unsigned)val[SCOPE_HEIGHT - i - 1];
-	if(v >= NCOLOR)
-	    v = NCOLOR - 1;
-	pixels[i] = (unsigned char)color_ring[v];
+	v = (unsigned)(val[i] * AMP2);
+	if(v > NCOLOR - 1)
+	    val[i] = NCOLOR - 1;
+	else
+	    val[i] = v;
+    }
+
+    switch(depth) {
+      case 32:
+      case 24:
+	for(i = 0; i < SCOPE_HEIGHT; i++)
+	    ((uint32 *)pixels)[i] = (uint32)color_ring[(int)val[SCOPE_HEIGHT - i - 1]];
+	break;
+      case 16:
+	for(i = 0; i < SCOPE_HEIGHT; i++)
+	    ((uint16 *)pixels)[i] = (uint16)color_ring[(int)val[SCOPE_HEIGHT - i - 1]];
+	break;
+      default:
+	for(i = 0; i < SCOPE_HEIGHT; i++)
+	    ((uint8 *)pixels)[i] = (uint8)color_ring[(int)val[SCOPE_HEIGHT - i - 1]];
+	break;
     }
 }
 
@@ -347,7 +370,7 @@ static void draw_scope(double *values)
     static int32 call_cnt;
     int offset, expose;
     XEvent e;
-    unsigned char pixels[SCOPE_HEIGHT];
+    char pixels[SCOPE_HEIGHT*32];
     double work[SCOPE_HEIGHT];
     int nze;
     char *mname;
@@ -584,6 +607,7 @@ void open_soundspec(void)
 
     set_color_ring();
     scr = DefaultScreen(disp);
+    depth = DefaultDepth(disp, scr);
     win = XCreateSimpleWindow(disp, DefaultRootWindow(disp),
 			      0, 0, SCOPE_WIDTH, SCOPE_HEIGHT,
 			      0, 0, BlackPixel(disp, scr));
@@ -598,14 +622,12 @@ void open_soundspec(void)
     gcv.graphics_exposures = False;
     gc = XCreateGC(disp, win, GCGraphicsExposures, &gcv);
 
-    offscr = XCreatePixmap(disp, win, SCOPE_WIDTH, SCOPE_HEIGHT,
-			   DefaultDepth(disp, scr));
+    offscr = XCreatePixmap(disp, win, SCOPE_WIDTH, SCOPE_HEIGHT, depth);
     XSetForeground(disp, gc, BlackPixel(disp, scr));
     XFillRectangle(disp, offscr, gc, 0, 0, SCOPE_WIDTH, SCOPE_HEIGHT);
 
     img = XCreateImage(disp, DefaultVisual(disp, scr),
-		       DefaultDepth(disp, scr),
-		       ZPixmap, 0, 0,
+		       depth, ZPixmap, 0, 0,
 		       1, SCOPE_HEIGHT, 8, 0);
     XMapWindow(disp, win);
     XSync(disp, False);
@@ -726,4 +748,10 @@ void soundspec_update_wave(int32 *buff, int samples)
 			  q);
 	next_wakeup_samples += soundspec_update_interval;
     }
+}
+
+/* Re-initialize something */
+void soundspec_reinit(void)
+{
+    initialize_exp_hz_table(soundspec_zoom);
 }

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
    common.c
 
@@ -29,14 +28,25 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <time.h>
+#ifdef HAVE_SYS_TIME_H
+#include <sys/time.h>
+#endif /* HAVE_SYS_TIME_H */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #ifndef NO_STRING_H
 #include <string.h>
 #else
 #include <strings.h>
 #endif
-#ifndef __WIN32__
+#include <ctype.h>
+#ifndef __W32__
 #include <unistd.h>
-#endif /* __WIN32__ */
+#else
+#include <process.h>
+#include <io.h>
+#endif /* __W32__ */
 #include "timidity.h"
 #include "common.h"
 #include "output.h"
@@ -44,6 +54,8 @@
 #include "arc.h"
 #include "nkflib.h"
 #include "wrd.h"
+#include "strtab.h"
+#include "support.h"
 
 /* RAND_MAX must defined in stdlib.h
  * Why RAND_MAX is not defined at SunOS?
@@ -52,12 +64,16 @@
 #define RAND_MAX ((1<<15)-1)
 #endif
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
 /* #define MIME_CONVERSION */
 
 char *program_name, current_filename[1024];
 MBlockList tmpbuffer;
-ArchiveFileList *archive_file_list = NULL;
-char *output_text_code = OUTPUT_TEXT_CODE;
+char *output_text_code = NULL;
+int open_file_noise_mode = OF_NORMAL;
 
 #ifdef DEFAULT_PATH
     /* The paths in this list will be tried whenever we're reading a file */
@@ -72,43 +88,122 @@ const char *note_name[] =
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 };
 
-static int url_copyfile(URL url, char *path)
-{
-    FILE *fp;
-    char buff[BUFSIZ];
-    int n;
 
-    if((fp = fopen(path, "wb")) == NULL)
-	return -1;
-    while((n = url_read(url, buff, sizeof(buff))) > 0)
-	fwrite(buff, 1, n, fp);
-    fclose(fp);
-    return 0;
+#ifndef TMP_MAX
+#define TMP_MAX 238328
+#endif
+
+int
+tmdy_mkstemp(char *tmpl)
+{
+  char *XXXXXX;
+  static uint32 value;
+  uint32 random_time_bits;
+  int count, fd = -1;
+  int save_errno = errno;
+
+  /* These are the characters used in temporary filenames.  */
+  static const char letters[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+  /* This is where the Xs start.  */
+  XXXXXX = strstr(tmpl, "XXXXXX");
+  if (XXXXXX == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  /* Get some more or less random data.  */
+#if HAVE_GETTIMEOFDAY
+  {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    random_time_bits = (uint32)((tv.tv_usec << 16) ^ tv.tv_sec);
+  }
+#else
+  random_time_bits = (uint32)time(NULL);
+#endif
+
+  value += random_time_bits ^ getpid();
+
+  for (count = 0; count < TMP_MAX; value += 7777, ++count) {
+    uint32 v = value;
+
+    /* Fill in the random bits.  */
+    XXXXXX[0] = letters[v % 62];
+    v /= 62;
+    XXXXXX[1] = letters[v % 62];
+    v /= 62;
+    XXXXXX[2] = letters[v % 62];
+
+    v = (v << 16) ^ value;
+    XXXXXX[3] = letters[v % 62];
+    v /= 62;
+    XXXXXX[4] = letters[v % 62];
+    v /= 62;
+    XXXXXX[5] = letters[v % 62];
+
+#ifdef _MSC_VER
+#define S_IRUSR 0
+#define S_IWUSR 0
+#endif
+
+	fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL | O_BINARY, S_IRUSR | S_IWUSR);
+
+    if (fd >= 0) {
+      errno = save_errno;
+      return fd;
+    }
+    if (errno != EEXIST)
+      return -1;
+  }
+
+  /* We got out of the loop because we ran out of combinations to try.  */
+  errno = EEXIST;
+  return -1;
 }
 
-static char *make_temp_filename(char *ext)
-{
-    static char buff[1024], *tmpdir;
-    static int cnt;
 
-    if(ext == NULL)
-	ext = "";
+static char *
+url_dumpfile(URL url, const char *ext)
+{
+  char filename[1024];
+  char *tmpdir;
+  int fd;
+  FILE *fp;
+  int n;
+  char buff[BUFSIZ];
 
 #ifdef TMPDIR
-    tmpdir = TMPDIR;
+  tmpdir = TMPDIR;
 #else
-    tmpdir = getenv("TMPDIR");
+  tmpdir = getenv("TMPDIR");
 #endif
-    if(tmpdir == NULL || strlen(tmpdir) == 0)
-	tmpdir = PATH_STRING "tmp" PATH_STRING;
-    if(tmpdir[strlen(tmpdir) - 1] == PATH_SEP)
-	sprintf(buff, "%stimidity-tmp%d-%d%s",
-		tmpdir, cnt++, (int)getpid(), ext);
-    else
-	sprintf(buff, "%s" PATH_STRING "timidity-tmp%d-%d%s",
-		tmpdir, cnt++, (int)getpid(), ext);
-    return buff;
+  if(tmpdir == NULL || strlen(tmpdir) == 0)
+    tmpdir = PATH_STRING "tmp" PATH_STRING;
+  if(IS_PATH_SEP(tmpdir[strlen(tmpdir) - 1]))
+    snprintf(filename, sizeof(filename), "%sXXXXXX.%s", tmpdir, ext);
+  else
+    snprintf(filename, sizeof(filename), "%s" PATH_STRING "XXXXXX.%s",
+	     tmpdir, ext);
+
+  fd = tmdy_mkstemp(filename);
+
+  if (fd == -1)
+    return NULL;
+
+  if ((fp = fdopen(fd, "w")) == NULL) {
+    close(fd);
+    unlink(filename);
+    return NULL;
+  }
+
+  while((n = url_read(url, buff, sizeof(buff))) > 0)
+    fwrite(buff, 1, n, fp);
+  fclose(fp);
+  return safe_strdup(filename);
 }
+
 
 /* Try to open a file for reading. If the filename ends in one of the
    defined compressor extensions, pipe the file through the decompressor */
@@ -118,36 +213,16 @@ struct timidity_file *try_to_open(char *name, int decompress)
     URL url;
     int len;
 
-#ifdef __MACOS__
-    if((url = url_open(name)) == NULL)
+    if((url = url_arc_open(name)) == NULL)
+      if((url = url_open(name)) == NULL)
 	return NULL;
-#else
-    archive_file_list = add_archive_list(archive_file_list, name);
-    errno = 0;
-    url = archive_file_extract_open(archive_file_list, name);
-    if(url == NULL)
-    {
-	if(last_archive_file_list != NULL &&
-	   last_archive_file_list->errstatus != 0)
-	{
-	    errno = last_archive_file_list->errstatus;
-	    return NULL;
-	}
-
-	if(strchr(name, '#') != NULL)
-	    return NULL;
-
-	if((url = url_open(name)) == NULL)
-	    return NULL;
-    }
-#endif /* __MACOS__ */
 
     tf = (struct timidity_file *)safe_malloc(sizeof(struct timidity_file));
     tf->url = url;
     tf->tmpname = NULL;
 
     len = strlen(name);
-    if(decompress && len >= 3 && strcmp(name + len - 3, ".gz") == 0)
+    if(decompress && len >= 3 && strcasecmp(name + len - 3, ".gz") == 0)
     {
 	int method;
 
@@ -178,6 +253,11 @@ struct timidity_file *try_to_open(char *name, int decompress)
 	url_cache_disable(tf->url);
     }
 
+#ifdef __W32__
+    /* Sorry, DECOMPRESSOR_LIST and PATCH_CONVERTERS are not worked yet. */
+    return tf;
+#endif /* __W32__ */
+
 #if defined(DECOMPRESSOR_LIST)
     if(decompress)
     {
@@ -189,16 +269,15 @@ struct timidity_file *try_to_open(char *name, int decompress)
 	{
 	    if(!check_file_extension(name, *dec, 0))
 		continue;
-	    tmpname = make_temp_filename(*dec);
-	    unlink(tmpname); /* For security */
-	    tf->tmpname = safe_strdup(tmpname);
-	    if(url_copyfile(tf->url, tmpname) == -1)
-	    {
+
+	    tf->tmpname = url_dumpfile(tf->url, *dec);
+	    if (tf->tmpname == NULL) {
 		close_file(tf);
 		return NULL;
 	    }
+
 	    url_close(tf->url);
-	    sprintf(tmp, *(dec+1), tf->tmpname);
+	    snprintf(tmp, sizeof(tmp), *(dec+1), tf->tmpname);
 	    if((tf->url = url_pipe_open(tmp)) == NULL)
 	    {
 		close_file(tf);
@@ -221,14 +300,13 @@ struct timidity_file *try_to_open(char *name, int decompress)
 	{
 	    if(!check_file_extension(name, *dec, 0))
 		continue;
-	    tmpname = make_temp_filename(*dec);
-	    unlink(tmpname); /* For security */
-	    tf->tmpname = safe_strdup(tmpname);
-	    if(url_copyfile(tf->url, tmpname) == -1)
-	    {
+
+	    tf->tmpname = url_dumpfile(tf->url, *dec);
+	    if (tf->tmpname == NULL) {
 		close_file(tf);
 		return NULL;
 	    }
+
 	    url_close(tf->url);
 	    sprintf(tmp, *(dec+1), tf->tmpname);
 	    if((tf->url = url_pipe_open(tmp)) == NULL)
@@ -264,13 +342,13 @@ static int is_url_prefix(char *name)
 	if(strncmp(name, url_proto_names[i], strlen(url_proto_names[i])) == 0)
 	    return 1;
 
-#ifdef __WIN32__
+#ifdef __W32__
     /* [A-Za-z]: (for Windows) */
     if((('A' <= name[0] && name[0] <= 'Z') ||
 	('a' <= name[0] && name[0] <= 'z')) &&
        name[1] == ':')
 	return 1;
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
     return 0;
 }
@@ -301,6 +379,7 @@ struct timidity_file *open_file(char *name, int decompress, int noise_mode)
   PathList *plp=pathlist;
   int l;
 
+  open_file_noise_mode = noise_mode;
   if (!name || !(*name))
     {
       if(noise_mode)
@@ -318,18 +397,18 @@ struct timidity_file *open_file(char *name, int decompress, int noise_mode)
     return tf;
 
 #ifdef __MACOS__
-  if (noise_mode && (errno != 0))
+  if(errno)
 #else
-  if (noise_mode && (errno != ENOENT))
-#endif /* __MACOS__ */
+  if(errno && errno != ENOENT)
+#endif
     {
-      if(noise_mode)
-        ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
-		  current_filename, strerror(errno));
-      return 0;
+	if(noise_mode)
+	    ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
+		      current_filename, strerror(errno));
+	return 0;
     }
 
-  if (name[0] != PATH_SEP && !is_url_prefix(name))
+  if (!IS_PATH_SEP(name[0]) && !is_url_prefix(name))
     while (plp)  /* Try along the path then */
       {
 	*current_filename=0;
@@ -337,7 +416,7 @@ struct timidity_file *open_file(char *name, int decompress, int noise_mode)
 	if(l)
 	  {
 	    strcpy(current_filename, plp->path);
-	    if(current_filename[l-1] != PATH_SEP &&
+	    if(!IS_PATH_SEP(current_filename[l-1]) &&
 	       current_filename[l-1] != '#' &&
 	       name[0] != '#')
 		strcat(current_filename, PATH_STRING);
@@ -349,13 +428,14 @@ struct timidity_file *open_file(char *name, int decompress, int noise_mode)
 	if ((tf=try_to_open(current_filename, decompress)))
 	  return tf;
 #ifdef __MACOS__
-	if (noise_mode && (errno != 0))
+	if(errno)
 #else
-	if (noise_mode && (errno != ENOENT))
-#endif /* __MACOS__ */
-	  {
-	    ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
-		 current_filename, strerror(errno));
+	if(errno && errno != ENOENT)
+#endif
+	{
+	    if(noise_mode)
+		ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
+			  current_filename, strerror(errno));
 	    return 0;
 	  }
 	plp=plp->next;
@@ -378,7 +458,7 @@ void close_file(struct timidity_file *tf)
     int save_errno = errno;
     if(tf->url != NULL)
     {
-#ifndef __WIN32__
+#ifndef __W32__
 	if(tf->tmpname != NULL)
 	{
 	    int i;
@@ -386,7 +466,7 @@ void close_file(struct timidity_file *tf)
 	    for(i = 0; tf_getc(tf) != EOF && i < 0xFFFF; i++)
 		;
 	}
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 	url_close(tf->url);
     }
     if(tf->tmpname != NULL)
@@ -444,7 +524,7 @@ void safe_exit(int status)
 {
     if(play_mode->fd != -1)
     {
-	play_mode->purge_output();
+	play_mode->acntl(PM_REQ_DISCARD, NULL);
 	play_mode->close_output();
     }
     ctl->close();
@@ -468,21 +548,18 @@ void *safe_malloc(size_t count)
 		  "Strange, I feel like allocating %d bytes. "
 		  "This must be a bug.", count);
     }
-    else if((p = (void *)malloc(count)) != NULL)
+    else {
+      if(count == 0)
+	/* Some malloc routine return NULL if count is zero, such as
+	 * malloc routine from libmalloc.a of Solaris.
+	 * But TiMidity doesn't want to return NULL even if count is zero.
+	 */
+	count = 1;
+      if((p = (void *)malloc(count)) != NULL)
 	return p;
-    else
-    {
-	if(count == 0) {
-	    /* Some malloc routine return NULL if count is zero, such as
-	     * malloc routine from libmalloc.a of Solaris.
-	     * But TiMidity doesn't want to return NULL even if count is zero.
-	     */
-	    return safe_malloc(1);
-	}
-
-	errflag = 1;
-	ctl->cmsg(CMSG_FATAL, VERB_NORMAL,
-		  "Sorry. Couldn't malloc %d bytes.", count);
+      errflag = 1;
+      ctl->cmsg(CMSG_FATAL, VERB_NORMAL,
+		"Sorry. Couldn't malloc %d bytes.", count);
     }
 #ifdef ABORT_AT_FATAL
     abort();
@@ -498,11 +575,18 @@ void *safe_large_malloc(size_t count)
 
     if(errflag)
 	safe_exit(10);
+    if(count == 0)
+      /* Some malloc routine return NULL if count is zero, such as
+       * malloc routine from libmalloc.a of Solaris.
+       * But TiMidity doesn't want to return NULL even if count is zero.
+       */
+      count = 1;
     if((p = (void *)malloc(count)) != NULL)
-	return p;
+      return p;
     errflag = 1;
     ctl->cmsg(CMSG_FATAL, VERB_NORMAL,
 	      "Sorry. Couldn't malloc %d bytes.", count);
+
 #ifdef ABORT_AT_FATAL
     abort();
 #endif /* ABORT_AT_FATAL */
@@ -524,13 +608,20 @@ void *safe_realloc(void *ptr, size_t count)
 		  "Strange, I feel like allocating %d bytes. "
 		  "This must be a bug.", count);
     }
-    else if((p = (void *)realloc(ptr, count)) != NULL)
+    else {
+      if (ptr == NULL)
+	return safe_malloc(count);
+      if(count == 0)
+	/* Some malloc routine return NULL if count is zero, such as
+	 * malloc routine from libmalloc.a of Solaris.
+	 * But TiMidity doesn't want to return NULL even if count is zero.
+	 */
+	count = 1;
+      if((p = (void *)realloc(ptr, count)) != NULL)
 	return p;
-    else
-    {
-	errflag = 1;
-	ctl->cmsg(CMSG_FATAL, VERB_NORMAL,
-		  "Sorry. Couldn't realloc %d bytes.", count);
+      errflag = 1;
+      ctl->cmsg(CMSG_FATAL, VERB_NORMAL,
+		"Sorry. Couldn't malloc %d bytes.", count);
     }
 #ifdef ABORT_AT_FATAL
     abort();
@@ -566,10 +657,58 @@ char *safe_strdup(char *s)
 /* This adds a directory to the path list */
 void add_to_pathlist(char *s)
 {
-  PathList *plp=safe_malloc(sizeof(PathList));
-  strcpy((plp->path=safe_malloc(strlen(s)+1)),s);
-  plp->next=pathlist;
-  pathlist=plp;
+    PathList *cur, *prev, *plp;
+
+    /* Check duplicated path in the pathlist. */
+    plp = prev = NULL;
+    for(cur = pathlist; cur; prev = cur, cur = cur->next)
+	if(pathcmp(s, cur->path, 0) == 0)
+	{
+	    plp = cur;
+	    break;
+	}
+
+    if(plp) /* found */
+    {
+	if(prev == NULL) /* first */
+	    pathlist = pathlist->next;
+	else
+	    prev->next = plp->next;
+    }
+    else
+    {
+	/* Allocate new path */
+	plp = safe_malloc(sizeof(PathList));
+	plp->path = safe_strdup(s);
+    }
+
+    plp->next = pathlist;
+    pathlist = plp;
+}
+
+void clean_up_pathlist(void)
+{
+  PathList *cur, *next;
+
+  cur = pathlist;
+  while (cur) {
+    next = cur->next;
+#ifdef DEFAULT_PATH
+    if (cur == &defaultpathlist) {
+      cur = next;
+      continue;
+    }
+#endif
+    free(cur->path);
+    free(cur);
+    cur = next;
+  }
+
+#ifdef DEFAULT_PATH
+  pathlist = &defaultpathlist;
+#else
+  pathlist = NULL;
+#endif
 }
 
 #ifndef HAVE_VOLATILE
@@ -578,6 +717,31 @@ int volatile_touch(void *dmy) {return 1;}
 #endif /* HAVE_VOLATILE */
 
 /* code converters */
+static unsigned char
+      w2k[] = {128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,
+               144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,
+               160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,
+               176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,
+               225,226,247,231,228,229,246,250,233,234,235,236,237,238,239,240,
+               242,243,244,245,230,232,227,254,251,253,255,249,248,252,224,241,
+               193,194,215,199,196,197,214,218,201,202,203,204,205,206,207,208,
+               210,211,212,213,198,200,195,222,219,221,223,217,216,220,192,209};
+
+static void code_convert_cp1251(char *in, char *out, int maxlen)
+{
+    int i;
+    if(out == NULL)
+        out = in;
+    for(i = 0; i < maxlen && in[i]; i++)
+    {
+	if(in[i] & 0200)
+	    out[i] = w2k[in[i] & 0177];
+	else
+	    out[i] = in[i];
+    }
+    out[i]='\0';
+}
+
 static void code_convert_dump(char *in, char *out, int maxlen, char *ocode)
 {
     if(ocode == NULL)
@@ -625,13 +789,13 @@ static void code_convert_japan(char *in, char *out, int maxlen,
 	mode = output_text_code;
 	if(mode == NULL || strstr(mode, "AUTO"))
 	{
-#ifndef __WIN32__
+#ifndef __W32__
 	    mode = getenv("LANG");
 #else
 	    mode = "SJIS";
 	    wrd_mode = "SJISK";
 #endif
-	    if(mode == NULL)
+	    if(mode == NULL || *mode == '\0')
 	    {
 		mode = "ASCII";
 		wrd_mode = mode;
@@ -779,6 +943,12 @@ void code_convert(char *in, char *out, int outsiz, char *icode, char *ocode)
 	    code_convert_dump(in, out, outsiz - 1, "ASCII");
 	    return;
 	}
+
+	if(strcasecmp(ocode, "1251") == 0)
+	{
+	    code_convert_cp1251(in, out, outsiz - 1);
+	    return;
+	}
     }
 
 #if defined(JAPANESE)
@@ -788,28 +958,111 @@ void code_convert(char *in, char *out, int outsiz, char *icode, char *ocode)
 #endif
 }
 
+/* EAW -- insert stuff from playlist files
+ *
+ * Tue Apr 6 1999: Modified by Masanao Izumo <mo@goice.co.jp>
+ *                 One pass implemented.
+ */
+static char **expand_file_lists(char **files, int *nfiles_in_out)
+{
+    int nfiles;
+    int i;
+    char input_line[256];
+    char *pfile;
+    static const char *testext = ".m3u.pls.asx.M3U.PLS.ASX";
+    struct timidity_file *list_file;
+    char *one_file[1];
+    int one;
+
+    /* Recusive global */
+    static StringTable st;
+    static int error_outflag = 0;
+    static int depth = 0;
+
+    if(depth >= 16)
+    {
+	if(!error_outflag)
+	{
+	    ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
+		      "Probable loop in playlist files");
+	    error_outflag = 1;
+	}
+	return NULL;
+    }
+
+    if(depth == 0)
+    {
+	error_outflag = 0;
+	init_string_table(&st);
+    }
+    nfiles = *nfiles_in_out;
+
+    /* Expand playlist recursively */
+    for(i = 0; i < nfiles; i++)
+    {
+	/* extract the file extension */
+	pfile = strrchr(files[i], '.');
+
+	if(*files[i] == '@' || (pfile != NULL && strstr(testext, pfile)))
+	{
+	    /* Playlist file */
+            if(*files[i] == '@')
+		list_file = open_file(files[i] + 1, 1, 1);
+            else
+		list_file = open_file(files[i], 1, 1);
+            if(list_file)
+	    {
+                while(tf_gets(input_line, sizeof(input_line), list_file)
+		      != NULL) {
+            	    if(*input_line == '\n' || *input_line == '\r')
+			continue;
+		    if((pfile = strchr(input_line, '\r')))
+		    	*pfile = '\0';
+		    if((pfile = strchr(input_line, '\n')))
+		    	*pfile = '\0';
+		    one_file[0] = input_line;
+		    one = 1;
+		    depth++;
+		    expand_file_lists(one_file, &one);
+		    depth--;
+		}
+                close_file(list_file);
+            }
+        }
+	else /* Other file */
+	    put_string_table(&st, files[i], strlen(files[i]));
+    }
+
+    if(depth)
+	return NULL;
+    *nfiles_in_out = st.nstring;
+    return make_string_array(&st);
+}
+
 char **expand_file_archives(char **files, int *nfiles_in_out)
 {
     int nfiles;
+    char **new_files;
+    int    new_nfiles;
 
+    /* First, expand playlist files */
     nfiles = *nfiles_in_out;
-    archive_file_list = make_archive_list(archive_file_list, nfiles, files);
-    if(archive_file_list != NULL)
-    {
-	char **new_files;
-	int    new_nfiles;
+    files = expand_file_lists(files, &nfiles);
+    if(files == NULL)
+      {
+	*nfiles_in_out = 0;
+	return NULL;
+      }
 
-	new_nfiles = nfiles;
-	new_files = expand_archive_names(archive_file_list,
-					 &new_nfiles, files);
-	if(new_files != NULL)
-	{
-	    nfiles = new_nfiles;
-	    files  = new_files;
-	}
-    }
-    *nfiles_in_out = nfiles;
-    return files;
+    /* Second, expand archive files */
+    new_nfiles = nfiles;
+    open_file_noise_mode = OF_NORMAL;
+    new_files = expand_archive_names(&new_nfiles, files);
+    free(files[0]);
+    free(files);
+
+    *nfiles_in_out = new_nfiles;
+    return new_files;
 }
 
 #ifdef RAND_MAX
@@ -880,4 +1133,114 @@ int check_file_extension(char *filename, char *ext, int decompress)
 #endif /* DECOMPRESSOR_LIST */
     }
     return 0;
+}
+
+void randomize_string_list(char **strlist, int n)
+{
+    int i, j;
+    char *tmp;
+    for(i = 0; i < n; i++)
+    {
+	j = int_rand(n - i);
+	tmp = strlist[j];
+	strlist[j] = strlist[n - i - 1];
+	strlist[n - i - 1] = tmp;
+    }
+}
+
+int pathcmp(const char *p1, const char *p2, int ignore_case)
+{
+    int c1, c2;
+
+#ifdef __W32__
+    ignore_case = 1;	/* Always ignore the case */
+#endif
+
+    do {
+	c1 = *p1++ & 0xff;
+	c2 = *p2++ & 0xff;
+	if(ignore_case)
+	{
+	    c1 = tolower(c1);
+	    c2 = tolower(c2);
+	}
+	if(IS_PATH_SEP(c1)) c1 = *p1 ? 0x100 : 0;
+	if(IS_PATH_SEP(c2)) c2 = *p2 ? 0x100 : 0;
+    } while(c1 == c2 && c1 /* && c2 */);
+
+    return c1 - c2;
+}
+
+static int pathcmp_qsort(const char **p1,
+			 const char **p2)
+{
+    return pathcmp(*(const char **)p1, *(const char **)p2, 1);
+}
+
+void sort_pathname(char **files, int nfiles)
+{
+    qsort(files, nfiles, sizeof(char *),
+	  (int (*)(const void *, const void *))pathcmp_qsort);
+}
+
+char *pathsep_strchr(char *path)
+{
+#ifdef PATH_SEP2
+    while(*path)
+    {
+        if(*path == PATH_SEP || *path == PATH_SEP2)
+	    return path;
+	path++;
+    }
+    return NULL;
+#else
+    return strchr(path, PATH_SEP);
+#endif
+}
+
+char *pathsep_strrchr(char *path)
+{
+#ifdef PATH_SEP2
+    char *last_sep = NULL;
+    while(*path)
+    {
+        if(*path == PATH_SEP || *path == PATH_SEP2)
+	    last_sep = path;
+	path++;
+    }
+    return last_sep;
+#else
+    return strrchr(path, PATH_SEP);
+#endif
+}
+
+int str2mID(char *str)
+{
+    int val;
+
+    if(strncasecmp(str, "gs", 2) == 0)
+	val = 0x41;
+    else if(strncasecmp(str, "xg", 2) == 0)
+	val = 0x43;
+    else if(strncasecmp(str, "gm", 2) == 0)
+	val = 0x7e;
+    else
+    {
+	int i, v;
+	val = 0;
+	for(i = 0; i < 2; i++)
+	{
+	    v = str[i];
+	    if('0' <= v && v <= '9')
+		v = v - '0';
+	    else if('A' <= v && v <= 'F')
+		v = v - 'A' + 10;
+	    else if('a' <= v && v <= 'f')
+		v = v - 'a' + 10;
+	    else
+		return 0;
+	    val = (val << 4 | v);
+	}
+    }
+    return val;
 }

@@ -1,11 +1,31 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
 #include <stdio.h>
 #include <stdlib.h>
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif
+#endif /* HAVE_UNISTD_H */
 #ifndef NO_STRING_H
 #include <string.h>
 #else
@@ -167,7 +187,7 @@ URL url_http_open(char *name)
     printf("open(host=`%s', port=`%d')\n", host, port);
 #endif /* DEBUG */
 
-#ifdef __WIN32__
+#ifdef __W32__
     timeout_flag = 0;
     fd = open_socket(host, port);
 #else
@@ -177,7 +197,7 @@ URL url_http_open(char *name)
     fd = open_socket(host, port);
     alarm(0);
     signal(SIGALRM, SIG_DFL);
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
     if(fd  == (SOCKET)-1)
     {
@@ -276,11 +296,11 @@ URL url_http_open(char *name)
 #endif /* DEBUG */
     }
 
-#ifdef __WIN32__
+#ifdef __W32__
     return url_buff_open((URL)url, 1);
 #else
     return (URL)url;
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 }
 
 static void url_http_close(URL url)

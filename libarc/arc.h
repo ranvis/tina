@@ -1,108 +1,99 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifndef ___LIBARC_H_
 #define ___LIBARC_H_
 
 /* Archive library */
 
-#include "memb.h"
+#include "url.h"
+#include "mblock.h"
 
-#define ARC_LIB_VERSION "1.4.12"
+#define ARC_LIB_VERSION "2.0.1"
 #define ARC_DEFLATE_LEVEL 6	/* 1:Compress faster .. 9:Compress better */
+#define ARC_ENTRY_HASHSIZE 63
 
-typedef struct _ArchiveStreamURL
-{
-    int idx;
-    long seek_start;
-    URL url;
-} ArchiveStreamURL;
 
+
+/*
+ * Interfaces
+ */
+
+extern char **expand_archive_names(int *nfiles_in_out, char **files);
+/* Regist all archive files in `files_in_out', and expand the archive */
+
+extern URL url_arc_open(char *name);
+/* Open input stream from archive.  `name' format must be "filename#entry".
+ */
+
+extern void free_archive_files(void);
+/* Call once at the last */
+
+/* utilities */
+extern int skip_gzip_header(URL url);
+extern int parse_gzip_header_bytes(char *gz, long maxparse, int *hdrsiz);
+extern int get_archive_type(char *archive_name);
+extern void *arc_compress(void *buff, long bufsiz,
+			  int compress_level, long *compressed_size);
+extern void *arc_decompress(void *buff, long bufsiz, long *decompressed_size);
+extern int arc_case_wildmat(char *text, char *p);
+extern int arc_wildmat(char *text, char *p);
+extern void (* arc_error_handler)(char *error_message);
+
+
+/*
+ * Internal library usage only
+ */
 typedef struct _ArchiveEntryNode
 {
     struct _ArchiveEntryNode *next; /* next entry */
+    char *name; /* Name of this entry */
+
     int comptype;		/* Compression/Encoding type */
-    int strmtype;		/* Archive stream type */
     long compsize;		/* Compressed size */
     long origsize;		/* Uncompressed size */
-
-    union
-    {
-	/* Archive streams */
-	MemBuffer compdata;	/* for ARCSTRM_MEMBUFFER */
-	long seek_start;	/* for ARCSTRM_SEEK_URL */
-	char *pathname;		/* for ARCSTRM_PATHNAME */
-	ArchiveStreamURL aurl;	/* for ARCSTRM_URL */
-    } u;
-    char filename[1];		/* Archive file name (variable length) */
+    long start;		/* Offset start point */
+    void *cache;		/* Cached data */
 } ArchiveEntryNode;
 
-typedef struct _ArchiveHandler
-{
-    /* Archive handler type */
-    int type;
-
-    /* Number of archive entryes */
-    int nfiles;
-
-    /* Archive entry */
-    ArchiveEntryNode *entry_head;
-    ArchiveEntryNode *entry_tail;
-
-    /* current extract entry */
-    ArchiveEntryNode *entry_cur;
-
-    /* current decode handler */
-    void *decoder;
-
-    /* decode rest size */
+typedef struct _ArchiveHandler {
+    int isfile;
+    URL url;	/* Input stream */
+    int counter;/* counter to extract the entry*/
     long pos;
+} ArchiveHandler;
 
-    /* for decoder stream */
-    URL decode_stream;
-
-    /* for AHANDLER_SEEK */
-    URL seek_stream;
-
-    /* Memory pool */
-    MBlockList pool;
-} *ArchiveHandler;
-
-typedef struct _ArchiveFileList
-{
-    char *archive_name;
-    int errstatus;
-    ArchiveHandler archiver;
-    struct _ArchiveFileList *next;
-} ArchiveFileList;
-
-struct archive_ext_type_t
-{
-    char *ext;
-    int type;
-};
-
-/* Archive handler type */
-enum
-{
-    AHANDLER_CACHED,
-    AHANDLER_SEEK,
-    AHANDLER_DIR,
-    AHANDLER_NEWSGROUP
-};
-
-/* Archive stream type */
-enum
-{
-    ARCSTRM_MEMBUFFER,
-    ARCSTRM_SEEK_URL,
-    ARCSTRM_PATHNAME,
-    ARCSTRM_URL,
-    ARCSTRM_NEWSGROUP
-};
+extern ArchiveHandler arc_handler;
+extern ArchiveEntryNode *arc_parse_entry(URL url, int archive_type);
+extern ArchiveEntryNode *new_entry_node(char *name, int len);
+extern ArchiveEntryNode *next_tar_entry(void);
+extern ArchiveEntryNode *next_zip_entry(void);
+extern ArchiveEntryNode *next_lzh_entry(void);
+extern ArchiveEntryNode *next_mime_entry(void);
+extern void free_entry_node(ArchiveEntryNode *entry);
 
 /* Compression/Encoding type */
 enum
 {
     ARCHIVEC_STORED,		/* No compression */
-    ARCHIVEC_PATHNAME,		/* Pathname */
+    ARCHIVEC_PATHNAME,		/* Pathname (Contents exists there) */
     ARCHIVEC_COMPRESSED,	/* Compressed */
     ARCHIVEC_PACKED,		/* Packed */
     ARCHIVEC_DEFLATED,		/* Deflate */
@@ -129,6 +120,8 @@ enum
     ARCHIVEC_LZHED_LHD,		/* -lhd- (Directory, No compression data) */
     ARCHIVEC_LZHED_LH6,		/* -lh6- */
     ARCHIVEC_LZHED_LH7,		/* -lh7- */
+
+    /* Encode for MIME */
     ARCHIVEC_UU,		/* uu encoded */
     ARCHIVEC_B64,		/* base64 encoded */
     ARCHIVEC_QS,		/* quoted string encoded */
@@ -146,44 +139,5 @@ enum
     ARCHIVE_MIME,
     ARCHIVE_NEWSGROUP
 };
-
-/* Internal archive library functions */
-extern ArchiveEntryNode *new_entry_node(MBlockList *pool,
-					char *filename, int flen);
-extern long archiver_read_func(char *buff, long buff_size, void *v);
-extern ArchiveEntryNode *next_tar_entry(ArchiveHandler archiver);
-extern ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver);
-extern ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver);
-extern ArchiveEntryNode *next_dir_entry(ArchiveHandler archiver);
-extern ArchiveEntryNode *next_mime_entry(ArchiveHandler archiver);
-extern ArchiveEntryNode *next_newsgroup_entry(ArchiveHandler archiver);
-extern int skip_gzip_header(URL url);
-
-/* Interface functions */
-extern ArchiveHandler open_archive_handler(URL instream, int archive_type);
-extern ArchiveHandler open_archive_handler_name(char *name);
-
-extern URL archive_extract_open(ArchiveHandler archiver, int idx);
-extern URL archive_extract_open_name(ArchiveHandler archiver,
-				     char *entry_name);
-extern void close_archive_handler(ArchiveHandler archiver);
-extern int get_archive_type(char *archive_name);
-extern ArchiveFileList *add_archive_list(ArchiveFileList *list,
-					 char *filename);
-extern ArchiveFileList *make_archive_list(ArchiveFileList *list,
-					  int nfiles, char **files);
-extern char **expand_archive_names(ArchiveFileList *list,
-				   int *nfiles_in_out, char **files);
-extern ArchiveFileList* find_archiver(ArchiveFileList *list,
-				      char *archive_name, int *idx_ret);
-extern URL archive_file_extract_open(ArchiveFileList *list, char *name);
-extern void close_archive_files(ArchiveFileList *list);
-extern int arc_wildmat(char *text, char *ptn);
-extern int arc_case_wildmat(char *text, char *ptn);
-
-extern struct archive_ext_type_t archive_ext_list[];
-extern int arc_internal_prefixID;
-extern int arc_news_mime_allow;
-extern ArchiveFileList *last_archive_file_list;
 
 #endif /* ___LIBARC_H_ */

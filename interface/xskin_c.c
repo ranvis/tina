@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     xskin interface by Daisuke nagano <breeze_geo@geocities.co.jp>
 */
@@ -34,9 +33,9 @@
 #else
 #include <strings.h>
 #endif
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif /* __WIN32__ */
+#endif /* HAVE_UNISTD_H */
 
 #include "timidity.h"
 #include "common.h"
@@ -86,6 +85,7 @@ ControlMode ctl=
 {
     "skin interface", 'i',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     ctl_pass_playing_list,
@@ -192,7 +192,7 @@ static void ctl_lyric(int lyricid)
 	    {
 		lyric_buf[0] = 'L';
 		lyric_buf[1] = ' ';
-		sprintf(lyric_buf + 2, "%s", lyric + 2);
+		snprintf(lyric_buf + 2, sizeof (lyric_buf) - 2, "%s", lyric + 2);
 		xskin_pipe_write(lyric_buf);
 		lyric_col = strlen(lyric + 2) + 2;
 	    }
@@ -201,18 +201,18 @@ static void ctl_lyric(int lyricid)
 		lyric_buf[0] = 'L';
 		lyric_buf[1] = ' ';
 		if(lyric[2] == 'L')
-		    sprintf(lyric_buf + 2, "Language: %s", lyric + 3);
+		    snprintf(lyric_buf + 2, sizeof (lyric_buf) - 2, "Language: %s", lyric + 3);
 		else if(lyric[2] == 'T')
-		    sprintf(lyric_buf + 2, "Title: %s", lyric + 3);
+		    snprintf(lyric_buf + 2, sizeof (lyric_buf) - 2, "Title: %s", lyric + 3);
 		else
-		    sprintf(lyric_buf + 2, "%s", lyric + 1);
+		    snprintf(lyric_buf + 2, sizeof (lyric_buf) - 2, "%s", lyric + 1);
 		xskin_pipe_write(lyric_buf);
 	    }
 	    else
 	    {
 		lyric_buf[0] = 'L';
 		lyric_buf[1] = ' ';
-		sprintf(lyric_buf + lyric_col, lyric + 1);
+		snprintf(lyric_buf + lyric_col, sizeof (lyric_buf) - lyric_col, "%s", lyric + 1);
 		xskin_pipe_write(lyric_buf);
 		lyric_col += strlen(lyric + 1);
 	    }
@@ -221,7 +221,7 @@ static void ctl_lyric(int lyricid)
 	{
 	    if(lyric[0] == ME_CHORUS_TEXT || lyric[0] == ME_INSERT_TEXT)
 		lyric_col = 0;
-	    sprintf(lyric_buf + lyric_col, lyric + 1);
+	    snprintf(lyric_buf + lyric_col, sizeof (lyric_buf) - lyric_col, "%s", lyric + 1);
 	    xskin_pipe_write(lyric_buf);
 	}
     }

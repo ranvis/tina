@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     Functions to play sound on a HP's audio device
 
@@ -42,28 +41,23 @@
 
 static int open_output(void); /* 0=success, 1=warning, -1=fatal error */
 static void close_output(void);
-static void output_data(int32 *buf, int32 count);
-static int flush_output(void);
-static void purge_output(void);
-
-extern int default_play_event(void *);
+static int output_data(char *buf, int32 bytes);
+static int acntl(int request, void *arg);
 
 /* export the playback mode */
 
 #define dpm hpux_play_mode
 
 PlayMode dpm = {
-  DEFAULT_RATE, PE_16BIT|PE_SIGNED, PF_NEED_INSTRUMENTS|PF_CAN_TRACE,
+  DEFAULT_RATE, PE_16BIT|PE_SIGNED, PF_PCM_STREAM|PF_CAN_TRACE,
   -1,
   {0,0,0,0,0}, /* no extra parameters so far */
   "HP audio device", 'd',
   "/dev/audio",
-  default_play_event,
   open_output,
   close_output,
   output_data,
-  flush_output,
-  purge_output  
+  acntl
 };
 
 /*************************************************************************/
@@ -98,72 +92,32 @@ if(dpm.fd == -1)
 (void) ioctl(dpm.fd, AUDIO_SET_CHANNELS, (dpm.encoding & PE_MONO)?1:2);
 
 /* set some reasonable buffer size */
-(void) ioctl(dpm.fd, AUDIO_SET_TXBUFSIZE, 8*4096);
-
-/* output to all devices */
-(void) ioctl(dpm.fd, AUDIO_SET_OUTPUT, 
-	AUDIO_OUT_SPEAKER | AUDIO_OUT_HEADPHONE | AUDIO_OUT_LINE);
+(void) ioctl(dpm.fd, AUDIO_SET_TXBUFSIZE, 128*1024);
 
 return 0;
 }
 
-static void output_data(int32 *buf, int32 count)
+static int output_data(char *buf, int32 nbytes)
 {
-  if (!(dpm.encoding & PE_MONO)) count*=2; /* Stereo samples */
-  
-  if (dpm.encoding & PE_16BIT)
-    {
-      if (dpm.encoding & PE_BYTESWAP)
-	{
-	  if (dpm.encoding & PE_SIGNED)
-	    s32tos16x(buf, count);
-	  else
-	    s32tou16x(buf, count);
-	}
-      else
-	{
-	  if (dpm.encoding & PE_SIGNED)
-	    s32tos16(buf, count);
-	  else 
-	    s32tou16(buf, count);
-	}
-
-      /* write the data out */
-      write(dpm.fd, buf, count * 2);
-
-    }
-  else
-    {
-      if (dpm.encoding & PE_ULAW)
-	{
-	  s32toulaw(buf, count);
-	}
-      else
-	{
-	  if (dpm.encoding & PE_SIGNED)
-	    s32tos8(buf, count);
-	  else 
-	    s32tou8(buf, count);
-	}
-      
-      /* write the data out */
-      write(dpm.fd, buf, count);
-    }
+    return write(dpm.fd, buf, nbytes);
 }
 
 static void close_output(void)
 {
-  /* free resources */
-  close(dpm.fd);
+    if(dpm.fd != -1)
+    {
+	/* free resources */
+	close(dpm.fd);
+	dpm.fd = -1;
+    }
 }
 
-static int flush_output(void)
+static int acntl(int request, void *arg)
 {
-(void) ioctl(dpm.fd, AUDIO_DRAIN, RESET_TX_BUF);
-return RC_NONE;
-}
-
-static void purge_output(void)
-{
-(void) ioctl(dpm.fd, AUDIO_RESET, RESET_TX_BUF);
+    switch(request)
+    {
+      case PM_REQ_DISCARD:
+	return ioctl(dpm.fd, AUDIO_RESET, RESET_TX_BUF);
+    }
+    return -1;
 }

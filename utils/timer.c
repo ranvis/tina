@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 */
 
@@ -49,6 +48,16 @@ double get_current_calender_time(void)
 #endif
 
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0 ;
+}
+
+#elif __MACOS__
+
+#include "timer.h"
+double get_current_calender_time(void)
+{
+    UnsignedWide usec;
+    Microseconds(&usec);
+    return (double)usec.hi* 4294.967296 + (double)usec.lo / 1000000.0 ;
 }
 
 #else /* Windows API */

@@ -1,9 +1,6 @@
-#ifndef ___MOTIF_H_
-#define ___MOTIF_H_
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -18,11 +15,14 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     motif.h: written by Vincent Pagel (pagel@loria.fr) 10/4/95
 
     */
+
+#ifndef ___MOTIF_H_
+#define ___MOTIF_H_
 
 /*
  * MESSAGE FROM KERNEL TO MOTIF

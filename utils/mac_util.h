@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -31,10 +31,13 @@ void	StopAlertMessage(Str255);
 
 void	SetDialogItemValue(DialogPtr dialog, short item, short value);
 short	GetDialogItemValue(DialogPtr dialog, short item );
+void	SetDialogTEValue(DialogRef dialog, short item, int value);
+int	GetDialogTEValue(DialogRef dialog, short item );
 short	ToggleDialogItem(DialogPtr dialog, short item );
 void	myGetDialogItemText(DialogPtr theDialog, short itemNo, Str255 s);
 void	mySetDialogItemText(DialogRef theDialog, short itemNo, const Str255 text);
 void	SetDialogControlTitle(DialogRef theDialog, short itemNo, const Str255 text);
+void	SetDialogItemHilite(DialogRef dialog, short item, short value);
 void	mac_TransPathSeparater(const char str[], char out[]);
 void	LDeselectAll(ListHandle);
 void	TEReadFile(char* filename, TEHandle te);
@@ -57,12 +60,12 @@ void	TEReadFile(char* filename, TEHandle te);
   Because CodeWarrior does not support sys_errlist[].
   If your compiler supports, you need not applend this file.
 */
-char** sys_errlist_();
-#define sys_errlist sys_errlist_()
+//char** sys_errlist_();
+//#define sys_errlist sys_errlist_()
 char* strdup(const char*);
 //char* strncasecmp(const char*, const char*, int);
 #define	strcasecmp mac_strcasecmp
-#define	strncasecmp mac_strncasecmp
+//#define	strncasecmp mac_strncasecmp
 int mac_strcasecmp(const char *s1, const char *s2);
 int mac_strncasecmp(const char *s1, const char *s2, size_t n );
 int strtailcasecmp(const char *s1, const char *s2);

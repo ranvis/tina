@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     au_a.c
 
@@ -27,12 +26,16 @@
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
 #include <stdio.h>
-#ifdef __WIN32__
+
+#ifdef __W32__
 #include <stdlib.h>
 #include <io.h>
-#else
-#include <unistd.h>
 #endif
+
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif /* HAVE_UNISTD_H */
+
 #ifndef NO_STRING_H
 #include <string.h>
 #else
@@ -45,51 +48,40 @@
 #endif
 
 #include "timidity.h"
+#include "common.h"
 #include "output.h"
 #include "controls.h"
-
-#ifdef __WIN32__
-#define OPEN_MODE O_WRONLY | O_CREAT | O_TRUNC | O_BINARY
-#else
-#define OPEN_MODE O_WRONLY | O_CREAT | O_TRUNC
-#endif
+#include "instrum.h"
+#include "playmidi.h"
+#include "readmidi.h"
 
 static int open_output(void); /* 0=success, 1=warning, -1=fatal error */
 static void close_output(void);
-static void output_data(int32 *buf, int32 count);
-static int flush_output(void);
-static void purge_output(void);
-static int32 current_samples(void);
-static int play_loop(void);
+static int output_data(char *buf, int32 bytes);
+static int acntl(int request, void *arg);
 static int write_u32(uint32 value);
-
-extern int default_play_event(void *);
 
 /* export the playback mode */
 
 #define dpm au_play_mode
 
 PlayMode dpm = {
-    8000, PE_MONO|PE_SIGNED|PE_ULAW, PF_NEED_INSTRUMENTS,
+    8000, PE_MONO|PE_ULAW, PF_PCM_STREAM,
     -1,
     {0,0,0,0,0},
     "Sun audio file", 'u',
-    "output.au",
-    default_play_event,
+    NULL,
     open_output,
     close_output,
     output_data,
-    flush_output,
-    purge_output,
-    current_samples,
-    play_loop
+    acntl
 };
 
 /*************************************************************************/
 
-/* Count the number of bytes output so the header can be fixed when
-   closing the file */
-static uint32 bytes_output;
+#define UPDATE_HEADER_STEP (128*1024) /* 128KB */
+static uint32 bytes_output, next_bytes;
+static int already_warning_lseek;
 
 static int write_u32(uint32 value)
 {
@@ -99,22 +91,20 @@ static int write_u32(uint32 value)
     {
 	ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: write: %s",
 		  dpm.name, strerror(errno));
-	close(dpm.fd);
-	dpm.fd = -1;
+	close_output();
 	return -1;
     }
     return n;
 }
 
-static int write_str(char *s)
+static int write_str(const char *s)
 {
     int n;
     if((n = write(dpm.fd, s, strlen(s))) == -1)
     {
 	ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: write: %s",
 		  dpm.name, strerror(errno));
-	close(dpm.fd);
-	dpm.fd = -1;
+	close_output();
 	return -1;
     }
     return n;
@@ -126,124 +116,214 @@ static int write_str(char *s)
 #define AUDIO_FILE_ENCODING_LINEAR_16   3      /* 16-bit linear PCM */
 #define AUDIO_FILE_ENCODING_ALAW_8      27     /* 8-bit ISDN A-law */
 
+static int au_output_open(const char *fname, const char *comment)
+{
+  if(strcmp(fname, "-") == 0) {
+    dpm.fd = 1; /* data to stdout */
+    if(comment == NULL)
+      comment = "(stdout)";
+  } else {
+    /* Open the audio file */
+    dpm.fd = open(fname, FILE_OUTPUT_MODE);
+    if(dpm.fd < 0) {
+      ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
+		fname, strerror(errno));
+      return -1;
+    }
+    if(comment == NULL)
+      comment = fname;
+  }
+
+  /* magic */
+  if(write_str(".snd") == -1) return -1;
+
+  /* header size */
+  if(write_u32((uint32)(24 + strlen(comment))) == -1) return -1;
+
+  /* sample data size */
+  if(write_u32((uint32)0xffffffff) == -1) return -1;
+
+  /* audio file encoding */
+  if(dpm.encoding & PE_ULAW) {
+      if(write_u32((uint32)AUDIO_FILE_ENCODING_MULAW_8) == -1) return -1;
+  } else if(dpm.encoding & PE_ALAW) {
+    if(write_u32((uint32)AUDIO_FILE_ENCODING_ALAW_8) == -1) return -1;
+  } else if(dpm.encoding & PE_16BIT) {
+    if(write_u32((uint32)AUDIO_FILE_ENCODING_LINEAR_16) == -1) return -1;
+  } else {
+    if(write_u32((uint32)AUDIO_FILE_ENCODING_LINEAR_8) == -1) return -1;
+  }
+
+  /* sample rate */
+  if(write_u32((uint32)dpm.rate) == -1) return -1;
+
+  /* number of channels */
+  if(dpm.encoding & PE_MONO) {
+    if(write_u32((uint32)1) == -1) return -1;
+  } else {
+    if(write_u32((uint32)2) == -1) return -1;
+  }
+
+  /* comment */
+  if(write_str(comment) == -1) return -1;
+
+  return 0;
+}
+
+static int auto_au_output_open(const char *input_filename)
+{
+  char *output_filename = (char *)safe_malloc(strlen(input_filename) + 5);
+  char *ext, *p;
+
+  strcpy(output_filename, input_filename);
+  if((ext = strrchr(output_filename, '.')) == NULL)
+    ext = output_filename + strlen(output_filename);
+  else {
+    /* strip ".gz" */
+    if(strcasecmp(ext, ".gz") == 0) {
+      *ext = '\0';
+      if((ext = strrchr(output_filename, '.')) == NULL)
+	ext = output_filename + strlen(output_filename);
+    }
+  }
+
+  /* replace '.' and '#' before ext */
+  for(p = output_filename; p < ext; p++)
+    if(*p == '.' || *p == '#')
+      *p = '_';
+
+  if(*ext && isupper(*(ext + 1)))
+    strcpy(ext, ".AU");
+  else
+    strcpy(ext, ".au");
+  if(au_output_open(output_filename, input_filename) == -1) {
+    free(output_filename);
+    return -1;
+  }
+  if(dpm.name != NULL)
+    free(dpm.name);
+  dpm.name = output_filename;
+  ctl->cmsg(CMSG_INFO, VERB_NORMAL, "Output %s", dpm.name);
+  return 0;
+}
+
 static int open_output(void)
 {
-    char *comment;
+    int include_enc, exclude_enc;
 
-    dpm.encoding &= ~PE_BYTESWAP;
-    dpm.encoding |= PE_SIGNED;
+    include_enc = exclude_enc = 0;
+    if(dpm.encoding & PE_16BIT)
+    {
+#ifdef LITTLE_ENDIAN
+	include_enc = PE_BYTESWAP;
+#else
+	exclude_enc = PE_BYTESWAP;
+#endif /* LITTLE_ENDIAN */
+	include_enc |= PE_SIGNED;
+    }
+    else if(!(dpm.encoding & (PE_ULAW|PE_ALAW)))
+    {
+	/* is 8 bit au unsigned ? */
+	exclude_enc = PE_SIGNED;
+    }
 
-    if(dpm.encoding & (PE_ULAW|PE_ALAW))
-	dpm.encoding &= ~PE_16BIT;
+    dpm.encoding = validate_encoding(dpm.encoding, include_enc, exclude_enc);
+
+    if(dpm.name == NULL) {
+      dpm.flag |= PF_AUTO_SPLIT_FILE;
+      dpm.name = NULL;
+    } else {
+      dpm.flag &= ~PF_AUTO_SPLIT_FILE;
+      if(au_output_open(dpm.name, NULL) == -1)
+	return -1;
+    }
 
     bytes_output = 0;
-
-    if(dpm.name && dpm.name[0] == '-' && dpm.name[1] == '\0')
-    {
-	dpm.fd = 1; /* data to stdout */
-	comment = "(stdout)";
-    }
-    else
-    {
-	/* Open the audio file */
-	dpm.fd = open(dpm.name, OPEN_MODE, 0644);
-	if(dpm.fd < 0)
-	{
-	    ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
-		      dpm.name, strerror(errno));
-	    return -1;
-	}
-	comment = dpm.name;
-    }
-
-    /* magic */
-    if(write_str(".snd") == -1) return -1;
-
-    /* header size */
-    if(write_u32((uint32)(24 + strlen(comment))) == -1) return -1;
-
-    /* sample data size */
-    if(write_u32((uint32)0xffffffff) == -1) return -1;
-
-    /* audio file encoding */
-    if(dpm.encoding & PE_ULAW)
-    {
-	if(write_u32((uint32)AUDIO_FILE_ENCODING_MULAW_8) == -1) return -1;
-    }
-    else if(dpm.encoding & PE_ALAW)
-    {
-	if(write_u32((uint32)AUDIO_FILE_ENCODING_ALAW_8) == -1) return -1;
-    }
-    else if(dpm.encoding & PE_16BIT)
-    {
-	if(write_u32((uint32)AUDIO_FILE_ENCODING_LINEAR_16) == -1) return -1;
-    }
-    else
-    {
-	if(write_u32((uint32)AUDIO_FILE_ENCODING_LINEAR_8) == -1) return -1;
-    }
-
-    /* sample rate */
-    if(write_u32((uint32)dpm.rate) == -1) return -1;
-
-    /* number of channels */
-    if(dpm.encoding & PE_MONO)
-    {
-	if(write_u32((uint32)1) == -1) return -1;
-    }
-    else
-    {
-	if(write_u32((uint32)2) == -1) return -1;
-    }
-
-    /* comment */
-    if(write_str(comment) == -1) return -1;
+    next_bytes = bytes_output + UPDATE_HEADER_STEP;
+    already_warning_lseek = 0;
 
     return 0;
 }
 
-static void output_data(int32 *buf, int32 count)
+
+static int update_header(void)
 {
-    if(!(dpm.encoding & PE_MONO))
-	count*=2; /* Stereo samples */
+    off_t save_point;
 
-    if(dpm.encoding & PE_16BIT)
-    {
-	s32tos16b(buf, count); /* Big-endian data */
-	while((-1==write(dpm.fd, buf, count * 2)) && errno==EINTR)
-	    ;
-	bytes_output += count * 2;
-    }
-    else
-    {
-	if(dpm.encoding & PE_ULAW)
-	    s32toulaw(buf, count);
-	else if(dpm.encoding & PE_ALAW)
-	    s32toalaw(buf, count);
-	else
-	    s32tos8(buf, count);
+    if(already_warning_lseek)
+	return 0;
 
-	while((-1==write(dpm.fd, buf, count)) && errno==EINTR)
-	    ;
-	bytes_output += count;
+    save_point = lseek(dpm.fd, 0, SEEK_CUR);
+    if(save_point == -1 || lseek(dpm.fd, 8, SEEK_SET) == -1)
+    {
+	ctl->cmsg(CMSG_WARNING, VERB_VERBOSE,
+		  "Warning: %s: %s: Can't make valid header",
+		  dpm.name, strerror(errno));
+	already_warning_lseek = 1;
+	return 0;
     }
+
+    if(write_u32(bytes_output) == -1) return -1;
+    lseek(dpm.fd, save_point, SEEK_SET);
+    ctl->cmsg(CMSG_INFO, VERB_DEBUG,
+	      "%s: Update au header (size=%d)", dpm.name, bytes_output);
+    return 0;
+}
+
+
+static int output_data(char *buf, int32 bytes)
+{
+    int n;
+
+    if(dpm.fd == -1)
+      return -1;
+
+    while(((n = write(dpm.fd, buf, bytes)) == -1) && errno == EINTR)
+	;
+    if(n == -1)
+    {
+	ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
+		  dpm.name, strerror(errno));
+	return -1;
+    }
+
+    bytes_output += bytes;
+
+#if UPDATE_HEADER_STEP > 0
+    if(bytes_output >= next_bytes)
+    {
+	if(update_header() == -1) return -1;
+	next_bytes = bytes_output + UPDATE_HEADER_STEP;
+    }
+#endif /* UPDATE_HEADER_STEP */
+    return n;
 }
 
 static void close_output(void)
 {
-    if(dpm.fd != 1) /* We don't close stdout */
-    {
-	/* It's not stdout, so it's probably a file, and we can try
-	   fixing the block lengths in the header before closing. */
-	if(lseek(dpm.fd, 8, SEEK_SET) >= 0)
-	    write_u32(bytes_output);
-	close(dpm.fd);
-    }
+  if(dpm.fd != 1 && /* We don't close stdout */
+     dpm.fd != -1) {
+    update_header();
+    close(dpm.fd);
     dpm.fd = -1;
+  }
 }
 
-/* Dummies */
-static int flush_output(void)	{ return RC_NONE; }
-static void purge_output(void)	{ }
-static int play_loop(void)	{ return 0; }
-static int32 current_samples(void) { return -1; }
+static int acntl(int request, void *arg)
+{
+  switch(request) {
+  case PM_REQ_PLAY_START:
+    if(dpm.flag & PF_AUTO_SPLIT_FILE)
+      return auto_au_output_open(current_file_info->filename);
+    break;
+  case PM_REQ_PLAY_END:
+    if(dpm.flag & PF_AUTO_SPLIT_FILE) {
+      close_output();
+      return 0;
+    }
+    break;
+  case PM_REQ_DISCARD:
+    return 0;
+  }
+  return -1;
+}

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     dumb_c.c
     Minimal control mode -- no interaction, just prints out messages.
@@ -41,9 +40,9 @@
 #include "instrum.h"
 #include "playmidi.h"
 #include "readmidi.h"
-#ifdef __WIN32__
+#ifdef __W32__
 #include "wrd.h"
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
 static int ctl_open(int using_stdin, int using_stdout);
 static void ctl_close(void);
@@ -64,7 +63,7 @@ ControlMode ctl=
 {
     "dumb interface", 'd',
     1,0,0,
-
+    0,
     ctl_open,
     ctl_close,
     dumb_pass_playing_list,
@@ -106,12 +105,9 @@ static int cmsg(int type, int verbosity_level, char *fmt, ...)
   if ((type==CMSG_TEXT || type==CMSG_INFO || type==CMSG_WARNING) &&
       ctl.verbosity<verbosity_level)
     return 0;
-
   va_start(ap, fmt);
-
   if(type == CMSG_WARNING || type == CMSG_ERROR || type == CMSG_FATAL)
       dumb_error_count++;
-
   if (!ctl.opened)
     {
       vfprintf(stderr, fmt, ap);
@@ -151,10 +147,10 @@ static void ctl_current_time(int secs)
   int mins;
   static int prev_secs = -1;
 
-#ifdef __WIN32__
+#ifdef __W32__
 	  if(wrdt->id == 'w')
 	    return;
-#endif /* __WIN32__ */
+#endif /* __W32__ */
   if (ctl.trace_playing && secs != prev_secs)
     {
       prev_secs = secs;
@@ -199,6 +195,7 @@ static void ctl_lyric(int lyricid)
 	    if(lyric[0] == ME_CHORUS_TEXT || lyric[0] == ME_INSERT_TEXT)
 		fprintf(outfp, "\r");
 	    fputs(lyric + 1, outfp);
+	    fflush(outfp);
 	}
     }
 }

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     xaw_c.c - XAW Interface from
 	Tomokazu Harada <harada@prince.pe.u-tokyo.ac.jp>
@@ -72,6 +71,7 @@ static void ctl_refresh(void);
 static void ctl_total_time(int tt);
 static void ctl_note(int status, int ch, int note, int velocity);
 static void ctl_program(int ch, int val, void *vp);
+static void ctl_drumpart(int ch, int is_drum);
 static void ctl_volume(int ch, int val);
 static void ctl_expression(int ch, int val);
 static void ctl_panning(int ch, int val);
@@ -106,6 +106,7 @@ ControlMode ctl=
 {
     "XAW interface", 'a',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     ctl_pass_playing_list,
@@ -251,7 +252,7 @@ static void ctl_lyric(int lyricid)
         {
             if(lyric[1] == '/' || lyric[1] == '\\')
             {
-                strcpy(lyric_buf, lyric + 2);
+                strncpy(lyric_buf, lyric + 2, sizeof(lyric_buf) - 1);
                 a_pipe_write_msg(lyric_buf);
                 lyric_col = strlen(lyric_buf);
             }
@@ -262,13 +263,13 @@ static void ctl_lyric(int lyricid)
                 else if(lyric[2] == 'T')
                     snprintf(lyric_buf, sizeof(lyric_buf), "Title: %s", lyric + 3);
                 else
-                    strncpy(lyric_buf, lyric + 1, sizeof(lyric_buf));
+                    strncpy(lyric_buf, lyric + 1, sizeof(lyric_buf) - 1);
                 a_pipe_write_msg(lyric_buf);
                 lyric_col = 0;
             }
             else
             {
-                strncpy(lyric_buf + lyric_col, lyric + 1, sizeof(lyric_buf) - lyric_col);
+                strncpy(lyric_buf + lyric_col, lyric + 1, sizeof(lyric_buf) - lyric_col - 1);
                 a_pipe_write_msg(lyric_buf);
                 lyric_col += strlen(lyric + 1);
             }
@@ -305,14 +306,13 @@ static void ctl_close(void)
 static void xaw_add_midi_file(char *additional_path) {
     char *files[1],**ret,**tmp;
     int i,nfiles,nfit;
-    char *p,*elem;
+    char *p;
 
     files[0] = additional_path;
     nfiles = 1;
-    if(elem= strrchr(additional_path,'#'))
-        ret = files;
-    else
-        ret = expand_file_archives(files, &nfiles);
+    ret = expand_file_archives(files, &nfiles);
+    if(ret == NULL)
+      return;
     tmp = list_of_files;
     titles=(char **)safe_realloc(titles,(number_of_files+nfiles)*sizeof(char *));
     list_of_files=(char **)safe_malloc((number_of_files+nfiles)*sizeof(char *));
@@ -339,11 +339,12 @@ static void xaw_add_midi_file(char *additional_path) {
         for (i=0;i<nfit;i++)
             a_pipe_write(titles[number_of_files-nfit+i]);
     }
-    if(ret != files) free(ret);
+    free(ret[0]);
+    free(ret);
 }
 
 static void xaw_delete_midi_file(int delete_num) {
-    int i, nfiles = -1;
+    int i;
     char *p;
 
     if(delete_num<0) {
@@ -353,7 +354,7 @@ static void xaw_delete_midi_file(int delete_num) {
         }
         list_of_files = NULL; titles = NULL;
         file_table=(int *)safe_realloc(file_table,1*sizeof(int));
-        file_table[0] = NULL;
+        file_table[0] = 0;
         number_of_files = 0;
     } else {
         free(titles[delete_num]);
@@ -408,7 +409,7 @@ static int ctl_blocking_read(int32 *valp) {
         opt_modulation_wheel = n & MODUL_BIT;
         opt_portamento = n & PORTA_BIT;
         opt_nrpn_vibrato = n & NRPNV_BIT;
-        opt_reverb_control = n & REVERB_BIT;
+        opt_reverb_control = !!(n & REVERB_BIT);
         opt_channel_pressure = n & CHPRESSURE_BIT;
         opt_overlap_voice_allow = n & OVERLAPV_BIT;
         opt_trace_text_meta_event = n & TXTMETA_BIT;
@@ -528,8 +529,8 @@ static void ctl_pass_playing_list(int init_number_of_files,
       char *title;
       snprintf(local_buf,sizeof(local_buf),"E %s",titles[file_table[current_no]]);
       a_pipe_write(local_buf);
-      if((title = get_midi_title(list_of_files[current_no])) == NULL)
-      title = list_of_files[current_no];
+      if((title = get_midi_title(list_of_files[file_table[current_no]])) == NULL)
+      title = list_of_files[file_table[current_no]];
       snprintf(local_buf,sizeof(local_buf),"e %s", title);
       a_pipe_write(local_buf);
       command=play_midi_file(list_of_files[file_table[current_no]]);
@@ -723,9 +724,7 @@ static void ctl_program(int ch, int val, void *comm)
   if(ch >= MAX_XAW_MIDI_CHANNELS) return;
   if(!ctl.trace_playing) return;
 
-  if(channel[ch].special_sample)
-    val = channel[ch].special_sample;
-  else
+  if(!IS_CURRENT_MOD_FILE)
     val += progbase;
   sprintf(local_buf, "PP%c%d", ch+'A', val);
   a_pipe_write(local_buf);
@@ -736,6 +735,14 @@ static void ctl_program(int ch, int val, void *comm)
               (!strlen((char *)comm))? "<drum>":(char *)comm);
     a_pipe_write(local_buf);
   }
+}
+static void ctl_drumpart(int ch, int is_drum)
+{
+  if(ch >= MAX_XAW_MIDI_CHANNELS) return;
+  if(!ctl.trace_playing) return;
+
+  sprintf(local_buf, "i%c%c", ch+'A', is_drum+'A');;
+  a_pipe_write(local_buf);
 }
 
 static void ctl_event(CtlEvent *e)
@@ -761,6 +768,9 @@ static void ctl_event(CtlEvent *e)
       break;
     case CTLE_PROGRAM:
       ctl_program((int)e->v1, (int)e->v2, (char *)e->v3);
+      break;
+    case CTLE_DRUMPART:
+      ctl_drumpart((int)e->v1, (int)e->v2);
       break;
     case CTLE_VOLUME:
       ctl_volume((int)e->v1, (int)e->v2);
@@ -823,6 +833,8 @@ static void ctl_reset(void)
   for (i=0; i<MAX_XAW_MIDI_CHANNELS; i++) {
     if(ISDRUMCHANNEL(i)) {
       ctl_program(i, channel[i].bank, channel_instrum_name(i));
+      if (opt_reverb_control)
+        set_otherinfo(i, get_reverb_level(i), 'r');
     } else {
       ToneBank *bank;
       int b;
@@ -835,11 +847,11 @@ static void ctl_reset(void)
           bank = tonebank[0];
       }
       set_otherinfo(i, channel[i].bank, 'b');
-      if (opt_reverb_control && channel[i].rb != NULL)
-        set_otherinfo(i, channel[i].rb->level, 'r');
+      if (opt_reverb_control)
+        set_otherinfo(i, get_reverb_level(i), 'r');
 
       if(opt_chorus_control)
-        set_otherinfo(i, channel[i].chorus_level, 'c');
+        set_otherinfo(i, get_chorus_level(i), 'c');
     }
     ctl_volume(i, channel[i].volume);
     ctl_expression(i, channel[i].expression);

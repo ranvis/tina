@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
@@ -15,6 +35,7 @@
 
 #ifdef HAVE_SAFE_MALLOC
 extern void *safe_malloc(size_t count);
+extern void *safe_realloc(void *old_ptr, size_t new_size);
 #endif /* HAVE_SAFE_MALLOC */
 
 /* #define DEBUG */
@@ -100,8 +121,10 @@ long url_read(URL url, void *buff, long n)
 	return 0;
     url_errno = URLERR_NONE;
     errno = 0;
-    if(url->nread >= url->readlimit)
+    if(url->nread >= url->readlimit) {
+        url->eof = 1;
 	return 0;
+    }
     if(url->nread + n > url->readlimit)
 	n = (long)(url->readlimit - url->nread);
     n = url->url_read(url, buff, n);
@@ -121,8 +144,11 @@ long url_safe_read(URL url, void *buff, long n)
 	errno = 0;
 	i = url_read(url, buff, n);
     } while(i == -1 && errno == EINTR);
+#if 0
+    /* Already done in url_read!! */
     if(i > 0)
 	url->nread += i;
+#endif
     return i;
 }
 
@@ -355,6 +381,7 @@ URL alloc_url(int size)
 
     url->nread = 0;
     url->readlimit = URL_MAX_READLIMIT;
+    url->eof = 0;
     return url;
 }
 
@@ -382,7 +409,7 @@ void url_close(URL url)
 	url->url_close(url);
 #if 0
 	url->url_close = NULL;
-#endif
+#endif /* unix */
     }
     errno = save_errno;
 }
@@ -398,7 +425,7 @@ char *url_expand_home_dir(char *fname)
     if(fname[0] != '~')
 	return fname;
 
-    if(fname[1] == PATH_SEP) /* ~/... */
+    if(IS_PATH_SEP(fname[1])) /* ~/... */
     {
 	fname++;
 	if((dir = getenv("HOME")) == NULL)
@@ -411,7 +438,7 @@ char *url_expand_home_dir(char *fname)
 	int i;
 
 	fname++;
-	for(i = 0; i < sizeof(path) && fname[i] && fname[i] != PATH_SEP; i++)
+	for(i = 0; i < sizeof(path) - 1 && fname[i] && !IS_PATH_SEP(fname[i]); i++)
 	    path[i] = fname[i];
 	path[i] = '\0';
 	if((pw = getpwnam(path)) == NULL)
@@ -420,9 +447,9 @@ char *url_expand_home_dir(char *fname)
 	dir = pw->pw_dir;
     }
     dirlen = strlen(dir);
-    strncpy(path, dir, sizeof(path));
+    strncpy(path, dir, sizeof(path) - 1);
     if(sizeof(path) > dirlen)
-	strncat(path, fname, sizeof(path) - dirlen);
+	strncat(path, fname, sizeof(path) - dirlen - 1);
     path[sizeof(path) - 1] = '\0';
     return path;
 }
@@ -432,7 +459,7 @@ char *url_unexpand_home_dir(char *fname)
     char *dir, *p;
     int dirlen;
 
-    if(fname[0] != PATH_SEP)
+    if(!IS_PATH_SEP(fname[0]))
 	return fname;
 
     if((dir = getenv("HOME")) == NULL)
@@ -442,14 +469,14 @@ char *url_unexpand_home_dir(char *fname)
     if(dirlen == 0 || dirlen >= sizeof(path) - 2)
 	return fname;
     memcpy(path, dir, dirlen);
-    if(path[dirlen - 1] != PATH_SEP)
+    if(!IS_PATH_SEP(path[dirlen - 1]))
 	path[dirlen++] = PATH_SEP;
 
-#ifndef __WIN32__
+#ifndef __W32__
     if(strncmp(path, fname, dirlen) != 0)
 #else
     if(strncasecmp(path, fname, dirlen) != 0)
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 	return fname;
 
     path[0] = '~';
@@ -491,4 +518,54 @@ char *url_strerror(int no)
     if(no >= URLERR_MAXNO)
 	return "Internal error";
     return url_strerror_txt[no - URLERR_NONE];
+}
+
+void *url_dump(URL url, long nbytes, long *read_size)
+{
+    long allocated, offset, read_len;
+    char *buff;
+
+    if(read_size != NULL)
+      *read_size = 0;
+    if(nbytes == 0)
+	return NULL;
+    if(nbytes >= 0)
+    {
+	buff = (void *)safe_malloc(nbytes);
+	if(nbytes == 0)
+	    return buff;
+	read_len = url_nread(url, buff, nbytes);
+	if(read_size != NULL)
+	  *read_size = read_len;
+	if(read_len <= 0)
+	{
+	    free(buff);
+	    return NULL;
+	}
+	return buff;
+    }
+
+    allocated = 1024;
+    buff = (char *)safe_malloc(allocated);
+    offset = 0;
+    read_len = allocated;
+    while((nbytes = url_read(url, buff + offset, read_len)) > 0)
+    {
+	offset += nbytes;
+	read_len -= nbytes;
+	if(offset == allocated)
+	{
+	    read_len = allocated;
+	    allocated *= 2;
+	    buff = (char *)safe_realloc(buff, allocated);
+	}
+    }
+    if(offset == 0)
+    {
+	free(buff);
+	return NULL;
+    }
+    if(read_size != NULL)
+      *read_size = offset;
+    return buff;
 }

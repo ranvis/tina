@@ -6,7 +6,7 @@ timidity.cfg \- configure file of TiMidity++
 .TP
 .B /etc/timidity.cfg
 .TP
-.B /usr/local/lib/timidity/timidity.cfg
+.B /usr/local/share/timidity/timidity.cfg
 
 .P
 .SH DESCRIPTION
@@ -36,7 +36,7 @@ TiMidity++ では、アーカイブファイルをパッチセットにすることができます。
 
 例:
 .br
-dir /usr/local/lib/timidity/inst/foo.zip#
+dir /usr/local/share/timidity/inst/foo.zip#
 .br
 bank 0
 .br
@@ -47,7 +47,7 @@ bank 0
 2 zoo.pat
 .br
 まず、dir で通常のディレクトリのようにアーカイブファイル (上の例では
-/usr/local/lib/timidity/inst/foo.zip)
+/usr/local/share/timidity/inst/foo.zip)
 を指定します。このとき、アーカイブファイル名
 の最後に \fB#\fP をつけてください。この \fB#\fP があることで、アーカイブファイルで
 あることを \fITiMidity++\fP は認識します。こうしておくと、\fIdir\fP で指定された
@@ -132,11 +132,13 @@ drumset 0
 altassign 42 44 46
 .br
 と書くと、ドラムセット 0 の 42/44/46 が排他的に鳴ります。
+ドラムセット 0 で定義されたオルタネートアサインは
+デフォルトで使用されます。
 
 .TP
 .BI "#extension comm" " program comment"
 Instrument 番号 \fIprogram\fP にコメント \fIcomment\fP を指定します．
-ここで設定した \fIcomment\fP は \fB\-iNt\fP や \fI\-iTt\fP オプション
+ここで設定した \fIcomment\fP は \fB\-int\fP や \fI\-iTt\fP オプション
 で起動した時に、インジケータラインに表示されます。
 .TP
 .BI "#extension timeout" " program secound"
@@ -162,7 +164,7 @@ FTP の proxy を設定します。proxy のホスト名を \fIhostname\fPに、
 このメールアドレスは、
 FTP 接続を proxy を介さずにダイレクトに繋ぐ場合に用いられます。
 .TP
-.BI "#extension [\-]{option}" " [optarg]"
+.BI "#extension opt [\-]{option}" " [optarg]"
 起動時のオプションを指定します。
 .TP
 .BI "#extension undef" " progno"
@@ -223,7 +225,7 @@ General Public License\fP for more details.
 .P
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 .SH AVAILABILITY
 The latest release is available on the TiMidity++ Page,

@@ -1,10 +1,10 @@
 /*
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 */
 
-/* This code from swesfx
+/* This code from awesfx
  * Modified by Masanao Izumo <mo@goice.co.jp>
  */
 
@@ -26,7 +26,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *================================================================*/
 
 #ifdef HAVE_CONFIG_H
@@ -40,7 +40,7 @@
 #endif
 #include <stdlib.h>
 #include <math.h>
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
 #include "timidity.h"
@@ -58,8 +58,8 @@
 
 #define FILENAME_NORMALIZE(fname) url_expand_home_dir(fname)
 #define FILENAME_REDUCED(fname)   url_unexpand_home_dir(fname)
-#define SFMalloc(rec, count) new_segment(&(rec)->pool, count)
-#define SFStrdup(rec, s)     strdup_mblock(&(rec)->pool, s)
+#define SFMalloc(rec, count)      new_segment(&(rec)->pool, count)
+#define SFStrdup(rec, s)          strdup_mblock(&(rec)->pool, s)
 
 /*----------------------------------------------------------------
  * compile flags
@@ -96,6 +96,14 @@ typedef struct _SampleList {
 	int16 scaleTuning;	/* pitch scale tuning(%), normally 100 */
 	int16 root, tune;
 	char low, high;		/* key note range */
+
+	/* Depend on play_mode->rate */
+	int32 vibrato_freq;
+	double attack;
+	double hold;
+	int sustain;
+	double decay;
+	double release;
 } SampleList;
 
 typedef struct _InstList {
@@ -122,10 +130,6 @@ typedef struct _SFOrder {
 #define INSTHASH(bank, preset, keynote) \
 	((int)(((unsigned)bank ^ (unsigned)preset ^ (unsigned)keynote) % INSTHASHSIZE))
 
-
-
-/*#define INSTHASH(bank, preset, keynote) 0*/
-
 typedef struct _SFInsts {
 	struct timidity_file *tf;
 	char *fname;
@@ -133,7 +137,6 @@ typedef struct _SFInsts {
 	uint16 version, minorversion;
 	int32 samplepos, samplesize;
 	InstList *instlist[INSTHASHSIZE];
-	int nrpresets;
 	char **inst_namebuf;
 	SFExclude *sfexclude;
 	SFOrder *sforder;
@@ -195,7 +198,7 @@ static void do_lowpass(Sample *sp, int32 freq, FLOAT_T resonance);
 
 static SFInsts *sfrecs = NULL;
 static SFInsts *current_sfrec = NULL;
-static int def_drum_inst;
+#define def_drum_inst 0
 
 static SFInsts *find_soundfont(char *sf_file)
 {
@@ -246,7 +249,6 @@ void add_soundfont(char *sf_file,
 	return;
     }
 
-    sf = (SFInsts *)safe_malloc(sizeof(SFInsts));
     sf = new_soundfont(sf_file);
     if(sf_order >= 0)
 	sf->def_order = sf_order;
@@ -336,7 +338,6 @@ static void init_sf(SFInsts *rec)
 	rec->minorversion = sfinfo.minorversion;
 	rec->samplepos = sfinfo.samplepos;
 	rec->samplesize = sfinfo.samplesize;
-	rec->nrpresets = sfinfo.npresets;
 	rec->inst_namebuf =
 	    (char **)SFMalloc(rec, sfinfo.npresets * sizeof(char *));
 	for(i = 0; i < sfinfo.npresets; i++)
@@ -375,6 +376,21 @@ static void end_soundfont(SFInsts *rec)
 	reuse_mblock(&rec->pool);
 }
 
+Instrument *extract_soundfont(char *sf_file, int bank, int preset,
+			      int keynote)
+{
+    SFInsts *sf;
+
+    if((sf = find_soundfont(sf_file)) != NULL)
+	return try_load_soundfont(sf, -1, bank, preset, keynote);
+    sf = new_soundfont(sf_file);
+    sf->next = sfrecs;
+    sf->def_order = 2;
+    sfrecs = sf;
+    init_sf(sf);
+    return try_load_soundfont(sf, -1, bank, preset, keynote);
+}
+
 /*----------------------------------------------------------------
  * get converted instrument info and load the wave data from file
  *----------------------------------------------------------------*/
@@ -406,7 +422,7 @@ static Instrument *try_load_soundfont(SFInsts *rec, int order, int bank,
 	for (ip = rec->instlist[addr]; ip; ip = ip->next) {
 		if (ip->pat.bank == bank && ip->pat.preset == preset &&
 		    (keynote < 0 || ip->pat.keynote == keynote) &&
-		    ip->order == order)
+		    (order < 0 || ip->order == order))
 			break;
 	}
 
@@ -438,6 +454,86 @@ Instrument *load_soundfont_inst(int order,
     return NULL;
 }
 
+/*----------------------------------------------------------------*/
+#define TO_MHZ(abscents) (int32)(8176.0 * pow(2.0,(double)(abscents)/1200.0))
+#if 0
+#ifndef M_LN2
+#define M_LN2		0.69314718055994530942
+#endif /* M_LN2 */
+#ifndef M_LN10
+#define M_LN10		2.30258509299404568402
+#endif /* M_LN10 */
+#define TO_VOLUME(centibel) (uint8)(255 * (1.0 - \
+				(centibel) * (M_LN10 / 1200.0 / M_LN2)))
+#else
+#define TO_VOLUME(level)  (uint8)(255.0 - (level) * (255.0/1000.0))
+#endif
+
+
+static FLOAT_T calc_volume(LayerTable *tbl)
+{
+    int v;
+    if(!tbl->set[SF_initAtten] || tbl->val[SF_initAtten] == 0)
+	return (FLOAT_T)1.0;
+    v = tbl->val[SF_initAtten];
+    if(v < 0)
+	return (FLOAT_T)1.0;
+    if(v > 956)
+	return (FLOAT_T)0.0;
+
+    v = v * 127 / 956;		/* 0..127 */
+
+    return vol_table[127 - v];
+}
+
+/*
+ * convert timecents to sec
+ */
+static double to_msec(int timecent)
+{
+    return 1000.0 * pow(2.0, (double)timecent / 1200.0);
+}
+
+/* convert from 8bit value to fractional offset (15.15) */
+static int32 to_offset(int offset)
+{
+	return (int32)offset << (7+15);
+}
+
+/* calculate ramp rate in fractional unit;
+ * diff = 8bit, time = msec
+ */
+static int32 calc_rate(int diff, double msec)
+{
+    double rate;
+
+    if(msec < 6)
+	msec = 6;
+    if(diff == 0)
+	diff = 255;
+    diff <<= (7+15);
+    rate = ((double)diff / play_mode->rate) * control_ratio * 1000.0 / msec;
+    if(fast_decay)
+	rate *= 2;
+    return (int32)rate;
+}
+
+/*
+ * Sustain level
+ * sf: centibels
+ * parm: 0x7f - sustain_level(dB) * 0.75
+ */
+static int32 calc_sustain(int sust_cB)
+{
+    double level;
+    if(sust_cB <= 0)
+	return 255;
+    level = (double)sust_cB;
+    if(level >= 1000)
+	return 1;
+    return TO_VOLUME(level);
+}
+
 static Instrument *load_from_file(SFInsts *rec, InstList *ip)
 {
 	SampleList *sp;
@@ -455,6 +551,11 @@ static Instrument *load_from_file(SFInsts *rec, InstList *ip)
 		      ip->pat.bank, ip->pat.preset + progbase,
 		      rec->inst_namebuf[ip->pr_idx]);
 	inst = (Instrument *)safe_malloc(sizeof(Instrument));
+/*
+	inst->instname = (char *)safe_malloc(strlen(rec->inst_namebuf[ip->pr_idx]));
+	strcpy(inst->instname,rec->inst_namebuf[ip->pr_idx]);
+*/
+	inst->instname = rec->inst_namebuf[ip->pr_idx];
 	inst->type = INST_SF2;
 	inst->samples = ip->samples;
 	inst->sample = (Sample *)safe_malloc(sizeof(Sample) * ip->samples);
@@ -474,6 +575,41 @@ static Instrument *load_from_file(SFInsts *rec, InstList *ip)
 			  sp->v.low_freq, sp->v.high_freq, sp->v.root_freq,
 			  sp->v.panning);
 		memcpy(sample, &sp->v, sizeof(Sample));
+
+		/* convert mHz to control ratio */
+		sample->vibrato_control_ratio = sp->vibrato_freq *
+		    (VIBRATO_RATE_TUNING * play_mode->rate) /
+			(2 * VIBRATO_SAMPLE_INCREMENTS);
+
+		/* convert envelop parameters */
+		sample->envelope_offset[0] = to_offset(255);
+		sample->envelope_rate[0] = calc_rate(255, sp->attack);
+
+		sample->envelope_offset[1] = to_offset(250);
+		sample->envelope_rate[1] = calc_rate(5, sp->hold);
+
+		sample->envelope_offset[2] = to_offset(sp->sustain);
+		sample->envelope_rate[2] = calc_rate(250 - sp->sustain, sp->decay);
+
+		sample->envelope_offset[3] = to_offset(5);
+		sample->envelope_rate[3] = calc_rate(255, sp->release);
+
+		sample->envelope_offset[4] = to_offset(4);
+		sample->envelope_rate[4] = to_offset(200);
+
+		sample->envelope_offset[5] = to_offset(4);
+		sample->envelope_rate[5] = to_offset(200);
+
+#if 0
+		sample->envelope_offset[3] = to_offset(1);
+		sample->envelope_rate[3] = calc_rate(sp->sustain, sp->release);
+
+		sample->envelope_offset[4] = sp->v.envelope_offset[3];
+		sample->envelope_rate[4] = sp->v.envelope_rate[3];
+
+		sample->envelope_offset[5] = sp->v.envelope_offset[4];
+		sample->envelope_rate[5] = sp->v.envelope_rate[4];
+#endif
 
 		if(i > 0 && (sample->note_to_use ||
 			     (sample->modes & MODES_LOOPING)))
@@ -691,7 +827,9 @@ static int parse_layer(SFInfo *sf, int pridx, LayerTable *tbl, int level)
 	SFInstHdr *inst;
 	int rc, i, nlayers;
 	SFGenLayer *lay, *globalp;
+#if 0
 	SFPresetHdr *preset = &sf->preset[pridx];
+#endif
 
 	if (level >= 2) {
 		fprintf(stderr, "parse_layer: too deep instrument level\n");
@@ -702,12 +840,17 @@ static int parse_layer(SFInfo *sf, int pridx, LayerTable *tbl, int level)
 	if (!tbl->set[SF_instrument])
 		return AWE_RET_SKIP;
 
+	inst = &sf->inst[tbl->val[SF_instrument]];
+
+	/* Here, TiMidity makes the reference of the data.  The real data
+	 * is loaded after.  So, duplicated data is allowed */
+#if 0
 	/* if non-standard drumset includes standard drum instruments,
 	   skip it to avoid duplicate the data */
-	inst = &sf->inst[tbl->val[SF_instrument]];
 	if (def_drum_inst >= 0 && preset->bank == 128 && preset->preset != 0 &&
 	    tbl->val[SF_instrument] == def_drum_inst)
 			return AWE_RET_SKIP;
+#endif
 
 	/* if layer is empty, skip it */
 	if ((nlayers = inst->hdr.nlayers) <= 0 ||
@@ -901,15 +1044,24 @@ static int sanity_range(LayerTable *tbl)
  * create patch record from the stored data table
  *----------------------------------------------------------------*/
 
+#ifdef CFG_FOR_SF
+static int cfg_for_sf_scan(char *name, int x_bank, int x_preset, int x_keynote_from, int x_keynote_to, int romflag);
+#endif
+
 static int make_patch(SFInfo *sf, int pridx, LayerTable *tbl)
 {
     int bank, preset, keynote;
+    int keynote_from, keynote_to, done;
     int addr, order;
     InstList *ip;
     SFSampleInfo *sample;
     SampleList *sp;
 
     sample = &sf->sample[tbl->val[SF_sampleId]];
+#ifdef CFG_FOR_SF
+	cfg_for_sf_scan(sample->name,sf->preset[pridx].bank,sf->preset[pridx].preset,LOWNUM(tbl->val[SF_keyRange]),
+		HIGHNUM(tbl->val[SF_keyRange]),sample->sampletype & 0x8000);
+#endif
     if(sample->sampletype & 0x8000) /* is ROM sample? */
     {
 	ctl->cmsg(CMSG_INFO, VERB_DEBUG, "preset %d is ROM sample: 0x%x",
@@ -919,10 +1071,14 @@ static int make_patch(SFInfo *sf, int pridx, LayerTable *tbl)
 
     bank = sf->preset[pridx].bank;
     preset = sf->preset[pridx].preset;
-    if(bank == 128)
-	keynote = LOWNUM(tbl->val[SF_keyRange]);
-    else
-	keynote = -1;
+    if(bank == 128){
+		keynote_from = LOWNUM(tbl->val[SF_keyRange]);
+		keynote_to = HIGHNUM(tbl->val[SF_keyRange]);
+    } else
+	keynote_from = keynote_to = -1;
+
+	done = 0;
+	for(keynote=keynote_from;keynote<=keynote_to;keynote++){
 
     ctl->cmsg(CMSG_INFO, VERB_DEBUG_SILLY,
 	      "SF make inst pridx=%d bank=%d preset=%d keynote=%d",
@@ -931,8 +1087,9 @@ static int make_patch(SFInfo *sf, int pridx, LayerTable *tbl)
     if(is_excluded(current_sfrec, bank, preset, keynote))
     {
 	ctl->cmsg(CMSG_INFO, VERB_DEBUG_SILLY, " * Excluded");
-	return AWE_RET_SKIP;
-    }
+	continue;
+    } else
+	done++;
 
     order = is_ordered(current_sfrec, bank, preset, keynote);
     if(order < 0)
@@ -1001,9 +1158,13 @@ static int make_patch(SFInfo *sf, int pridx, LayerTable *tbl)
     }
     ip->samples++;
 
-    return AWE_RET_OK;
-}
+	} /* for(;;) */
 
+	if(done==0)
+	return AWE_RET_SKIP;
+	else
+	return AWE_RET_OK;
+}
 
 /*----------------------------------------------------------------
  *
@@ -1026,38 +1187,6 @@ static void make_info(SFInfo *sf, SampleList *vp, LayerTable *tbl)
 #ifndef SF_SUPPRESS_VIBRATO
 	convert_vibrato(vp, tbl);
 #endif /* SF_SUPPRESS_VIBRATO */
-}
-
-/*----------------------------------------------------------------*/
-#define TO_MHZ(abscents) (int32)(8176.0 * pow(2.0,(double)(abscents)/1200.0))
-#if 0
-#ifndef M_LN2
-#define M_LN2		0.69314718055994530942
-#endif /* M_LN2 */
-#ifndef M_LN10
-#define M_LN10		2.30258509299404568402
-#endif /* M_LN10 */
-#define TO_VOLUME(centibel) (uint8)(255 * (1.0 - \
-				(centibel) * (M_LN10 / 1200.0 / M_LN2)))
-#else
-#define TO_VOLUME(level)  (uint8)(255.0 - (level) * (255.0/1000.0))
-#endif
-
-
-static FLOAT_T calc_volume(LayerTable *tbl)
-{
-    int v;
-    if(!tbl->set[SF_initAtten] || tbl->val[SF_initAtten] == 0)
-	return (FLOAT_T)1.0;
-    v = tbl->val[SF_initAtten];
-    if(v < 0)
-	return (FLOAT_T)1.0;
-    if(v > 956)
-	return (FLOAT_T)0.0;
-
-    v = v * 127 / 956;		/* 0..127 */
-
-    return vol_table[127 - v];
 }
 
 /* set sample address */
@@ -1258,6 +1387,8 @@ static void set_rootkey(SFInfo *sf, SampleList *vp, LayerTable *tbl)
 	/* from sample info */
 	vp->root = sp->originalPitch;
 	vp->tune = sp->pitchCorrection;
+	if (vp->tune >= 0x80)
+		vp->tune -= 0x100; /* correct sign */
     }
 
     /* orverride root key */
@@ -1270,6 +1401,13 @@ static void set_rootkey(SFInfo *sf, SampleList *vp, LayerTable *tbl)
     /* correct too high pitch */
     if(vp->root >= vp->high + 60)
 	vp->root -= 60;
+
+    /* correct tune with the sustain level of modulation envelope */
+    vp->tune += ((int)tbl->val[SF_env1ToPitch] * (1000 - (int)tbl->val[SF_sustainEnv1])) / 1000;
+
+    /* correct tune */
+    vp->tune += (int)tbl->val[SF_lfo1ToPitch]; 
+    vp->tune += (int)tbl->val[SF_lfo2ToPitch]; 
 }
 
 static void set_rootfreq(SampleList *vp)
@@ -1306,53 +1444,6 @@ static void set_rootfreq(SampleList *vp)
 
 /*----------------------------------------------------------------*/
 
-/*
- * convert timecents to sec
- */
-static double to_msec(int timecent)
-{
-    return 1000.0 * pow(2.0, (double)timecent / 1200.0);
-}
-
-/* convert from 8bit value to fractional offset (15.15) */
-static int32 to_offset(int offset)
-{
-	return (int32)offset << (7+15);
-}
-
-/* calculate ramp rate in fractional unit;
- * diff = 8bit, time = msec
- */
-static int32 calc_rate(int diff, double msec)
-{
-    double rate;
-
-    if(msec < 6)
-	msec = 6;
-    if(diff == 0)
-	diff = 255;
-    diff <<= (7+15);
-    rate = ((double)diff / play_mode->rate) * control_ratio * 1000.0 / msec;
-    if(fast_decay)
-	rate *= 2;
-    return (int32)rate;
-}
-
-/*
- * Sustain level
- * sf: centibels
- * parm: 0x7f - sustain_level(dB) * 0.75
- */
-static int32 calc_sustain(int sust_cB)
-{
-    double level;
-    if(sust_cB <= 0)
-	return 255;
-    level = (double)sust_cB;
-    if(level >= 1000)
-	return 1;
-    return TO_VOLUME(level);
-}
 
 /*Pseudo Reverb*/
 extern int32 modify_release;
@@ -1361,51 +1452,16 @@ extern int32 modify_release;
 /* volume envelope parameters */
 static void convert_volume_envelope(SampleList *vp, LayerTable *tbl)
 {
-    double attack;
-    double hold;
-    int sustain;
-    double decay;
-    double release;
-
-    attack  = to_msec(tbl->val[SF_attackEnv2]);
-    hold    = to_msec(tbl->val[SF_holdEnv2]);
-    sustain = calc_sustain(tbl->val[SF_sustainEnv2]);
-    decay   = to_msec(tbl->val[SF_decayEnv2]);
-    release = to_msec(tbl->val[SF_releaseEnv2]);
-
-    /*Pseudo Reverb*/
-    if (modify_release) release=modify_release;
-
-    vp->v.envelope_offset[0] = to_offset(255);
-    vp->v.envelope_rate[0] = calc_rate(255, attack);
-
-    vp->v.envelope_offset[1] = to_offset(250);
-    vp->v.envelope_rate[1] = calc_rate(5, hold);
-
-    if(sustain > 250)
-	sustain = 250;
-    vp->v.envelope_offset[2] = to_offset(sustain);
-    vp->v.envelope_rate[2] = calc_rate(250 - sustain, decay);
-
-    vp->v.envelope_offset[3] = to_offset(5);
-    vp->v.envelope_rate[3] = calc_rate(255, release);
-
-    vp->v.envelope_offset[4] = to_offset(4);
-    vp->v.envelope_rate[4] = to_offset(200);
-
-    vp->v.envelope_offset[5] = to_offset(4);
-    vp->v.envelope_rate[5] = to_offset(200);
-
-#if 0
-    vp->v.envelope_offset[3] = to_offset(1);
-    vp->v.envelope_rate[3] = calc_rate(sustain, release);
-
-    vp->v.envelope_offset[4] = vp->v.envelope_offset[3];
-    vp->v.envelope_rate[4] = vp->v.envelope_rate[3];
-
-    vp->v.envelope_offset[5] = vp->v.envelope_offset[4];
-    vp->v.envelope_rate[5] = vp->v.envelope_rate[4];
-#endif
+    vp->attack  = to_msec(tbl->val[SF_attackEnv2]);
+    vp->hold    = to_msec(tbl->val[SF_holdEnv2]);
+    vp->sustain = calc_sustain(tbl->val[SF_sustainEnv2]);
+    if(vp->sustain > 250)
+	vp->sustain = 250;
+    vp->decay   = to_msec(tbl->val[SF_decayEnv2]);
+    if(modify_release)
+	vp->release = modify_release;
+    else
+	vp->release = to_msec(tbl->val[SF_releaseEnv2]); /* Pseudo Reverb */
 
 #if 0 /* Not supported */
     /* key hold/decay */
@@ -1415,6 +1471,7 @@ static void convert_volume_envelope(SampleList *vp, LayerTable *tbl)
 
     vp->v.modes |= MODES_ENVELOPE;
 }
+
 
 #ifndef SF_SUPPRESS_TREMOLO
 /*----------------------------------------------------------------
@@ -1470,7 +1527,7 @@ static void convert_vibrato(SampleList *vp, LayerTable *tbl)
     /* cents to linear; 400cents = 256 */
     shift = shift * 256 / 400;
     if(shift < 0)
-	shift += 256;
+      shift = -shift;
     vp->v.vibrato_depth = (uint8)shift;
 
     /* frequency in mHz */
@@ -1481,10 +1538,7 @@ static void convert_vibrato(SampleList *vp, LayerTable *tbl)
 	freq = tbl->val[SF_freqLfo2];
 	freq = TO_MHZ(freq);
     }
-    /* convert mHz to control ratio */
-    vp->v.vibrato_control_ratio = freq *
-	(VIBRATO_RATE_TUNING * play_mode->rate) /
-	    (2 * VIBRATO_SAMPLE_INCREMENTS);
+    vp->vibrato_freq = freq;
     vp->v.vibrato_sweep_increment = 0;
 }
 #endif
@@ -1511,55 +1565,377 @@ static void convert_vibrato(SampleList *vp, LayerTable *tbl)
 #define MIN_DATAVAL -32768
 #endif
 
-/* ## FIXME */
 static void do_lowpass(Sample *sp, int32 freq, FLOAT_T resonance)
 {
-	double A, B, C;
-	sample_t *buf, pv1, pv2;
-	int32 i;
+	int32 i,length;
+	FLOAT_T f,k,p,r,scale;
+	sample_t *buf;
+	sample_t y1,y2,y3,y4,oldy1,oldy2,oldy3,oldx,x;
 
 	if (freq > sp->sample_rate * 2) {
 		ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
-			  "Lowpass: center must be < data rate*2");
+			  "Lowpass: center freq must be < data rate * 2");
 		return;
 	}
-	A = 2.0 * M_PI * freq * 2.5 / sp->sample_rate;
-	B = exp(-A / sp->sample_rate);
-	A *= 0.8;
-	B *= 0.8;
-	C = 0;
 
-	if (resonance) {
-		double a, b, c;
-		int32 width;
-		width = freq / 5;
-		c = exp(-2.0 * M_PI * width / sp->sample_rate);
-		b = -4.0 * c / (1+c) * cos(2.0 * M_PI * freq / sp->sample_rate);
-		a = sqrt(1 - b * b / (4 * c)) * (1 - c);
-		b = -b; c = -c;
-
-		A += a * resonance;
-		B += b;
-		C = c;
-	}
-
-	pv1 = 0;
-	pv2 = 0;
 	buf = sp->data;
+	length = sp->data_length;
 
-	for (i = 0; i < sp->data_length; i++) {
-		sample_t l = *buf;
-		double d = A * l + B * pv1 + C * pv2;
-		if (d > MAX_DATAVAL)
-			d = MAX_DATAVAL;
-		else if (d < MIN_DATAVAL)
-			d = MIN_DATAVAL;
-		pv2 = pv1;
-#ifndef CUTOFF_AMPTUNING
-		pv1 = *buf++ = (sample_t)d;
-#else
-		pv1 = (sample_t)d;
-		*buf++ = (sample_t)(d * CUTOFF_AMPTUNING);
-#endif
+	y1=y2=y3=y4=oldx=oldy1=oldy2=oldy3=0;
+
+	f = 2.0 * freq / sp->sample_rate;
+	k = 3.6*f - 1.6*f*f - 1;
+	p = (k+1)*0.5;
+	scale = exp((1-p)*1.386249);
+	r = resonance * scale;
+	r /= 4;
+	y4 = buf[0];
+
+	for(i=0;i<length;i++) {
+		buf[i] -= r * y4;
+		x = buf[i];
+
+		y1=(x+oldx)*p - k*y1;
+		y2=(y1+oldy1)*p - k*y2;
+		y3=(y2+oldy2)*p - k*y3;
+		y4=(y3+oldy3)*p - k*y4;
+
+		y4 -= y4 * y4 * y4 * 0.166667;
+
+		oldx = x;
+		oldy1 = y1;
+		oldy2 = y2;
+		oldy3 = y3;
 	}
 }
+
+
+
+#ifdef CFG_FOR_SF
+
+/*********************************************************************
+
+    cfg for soundfont utility.
+
+  demanded sources.
+     common.c  controls.c  dumb_c.c  instrum.c  sbkconv.c  sffile.c
+     sfitem.c  sndfont.c  tables.c  version.c
+     utils/*  libarc/*
+
+  MACRO
+      CFG_FOR_SF
+
+ *********************************************************************/
+
+static FILE *x_out;
+static char *x_sf_file_name = NULL;
+static int x_pre_bank = -1;
+static int x_pre_preset = -1;
+static int x_sort = 1;
+typedef struct x_cfg_info_t_ {
+	char m_bank[128][128];
+	char m_preset[128][128];
+	char m_rom[128][128];
+	char *m_str[128][128];
+	char d_preset[128][128];
+	char d_keynote[128][128];
+	char d_rom[128][128];
+	char *d_str[128][128];
+} x_cfg_info_t;
+static x_cfg_info_t x_cfg_info;
+static int x_cfg_info_init_flag = 0;
+static void x_cfg_info_init(void)
+{
+	if(!x_cfg_info_init_flag){
+		int i,j;
+		for(i=0;i<128;i++){
+			for(j=0;j<128;j++){
+				x_cfg_info.m_bank[i][j] = -1;
+				x_cfg_info.m_preset[i][j] = -1;
+				x_cfg_info.m_rom[i][j] = -1;
+				x_cfg_info.m_str[i][j] = NULL;
+				x_cfg_info.d_preset[i][j] = -1;
+				x_cfg_info.d_keynote[i][j] = -1;
+				x_cfg_info.d_rom[i][j] = -1;
+				x_cfg_info.d_str[i][j] = NULL;
+			}
+		}
+	}
+	x_cfg_info_init_flag = 1;
+}
+static int cfg_for_sf_scan(char *x_name, int x_bank, int x_preset, int x_keynote_from, int x_keynote_to, int romflag)
+{
+	int x_keynote;
+	x_cfg_info_init();
+	if(x_sort){
+//		if(x_bank!=x_pre_bank || x_preset!=x_pre_preset){
+		{
+			if(x_bank==128){
+				char *str;
+				char buff[256];
+				for(x_keynote=x_keynote_from;x_keynote<=x_keynote_from;x_keynote++){
+					x_cfg_info.d_preset[x_preset][x_keynote] = x_preset;
+					x_cfg_info.d_keynote[x_preset][x_keynote] = x_keynote;
+					if(romflag && x_cfg_info.d_rom[x_preset][x_keynote])
+						x_cfg_info.d_rom[x_preset][x_keynote] = 1;
+					else
+						x_cfg_info.d_rom[x_preset][x_keynote] = 0;
+					str = x_cfg_info.d_str[x_preset][x_keynote];
+					if(str==NULL){
+						str = (char *)realloc(str,(str==NULL?0:strlen(str))+strlen(x_name)+30);
+						str[0] = '\0';
+					} else{
+						str = (char *)realloc(str,(str==NULL?0:strlen(str))+strlen(x_name)+30);
+					}
+					sprintf(buff," %s",x_name);
+					strcat(str,buff);
+					x_cfg_info.d_str[x_preset][x_keynote] = str;
+				}
+			} else {
+				char *str = x_cfg_info.m_str[x_bank][x_preset];
+				char buff[256];
+				char *strROM;
+				x_cfg_info.m_bank[x_bank][x_preset] = x_bank;
+				x_cfg_info.m_preset[x_bank][x_preset] = x_preset;
+				if(romflag)
+					strROM = " (ROM)";
+				else
+					strROM = "";
+				if(romflag && x_cfg_info.m_rom[x_bank][x_preset])
+					x_cfg_info.m_rom[x_bank][x_preset] = 1;
+				else
+					x_cfg_info.m_rom[x_bank][x_preset] = 0;
+				if(str==NULL){
+					str = (char *)realloc(str,(str==NULL?0:strlen(str))+strlen(x_name)+30);
+					str[0] = '\0';
+				} else{
+					str = (char *)realloc(str,(str==NULL?0:strlen(str))+strlen(x_name)+30);
+				}
+				if(x_keynote_from!=x_keynote_to)
+					sprintf(buff,"        # %d-%d:%s%s\n",x_keynote_from,x_keynote_to,x_name,strROM);
+				else
+					sprintf(buff,"        # %d:%s%s\n",x_keynote_from,x_name,strROM);
+				strcat(str,buff);
+				x_cfg_info.m_str[x_bank][x_preset] = str;
+			}
+		}
+	} else {
+		if(x_bank==128){
+			if(x_preset!=x_pre_preset)
+				fprintf(x_out,"drumset %d\n",x_preset);
+		} else {
+			if(x_bank!=x_pre_bank)
+				fprintf(x_out,"bank %d\n",x_bank);
+		}
+		if(romflag){
+			if(x_bank==128){
+				for(x_keynote=x_keynote_from;x_keynote<=x_keynote_from;x_keynote++)
+					fprintf(x_out,"#  %d %%font %s %d %d %d # %s (ROM)\n",x_keynote,x_sf_file_name,x_bank,x_preset,x_keynote,x_name);
+			} else {
+				if(x_keynote_from==x_keynote_to)
+					fprintf(x_out,"#   %d %%font %s %d %d # %d:%s (ROM)\n",x_preset,x_sf_file_name,x_bank,x_preset,x_keynote_from,x_name);
+				else
+					fprintf(x_out,"#   %d %%font %s %d %d # %d-%d:%s (ROM)\n",x_preset,x_sf_file_name,x_bank,x_preset,x_keynote_from,x_keynote_to,x_name);
+			}
+		} else {
+			if(x_bank==128){
+				for(x_keynote=x_keynote_from;x_keynote<=x_keynote_from;x_keynote++)
+					fprintf(x_out,"    %d %%font %s %d %d %d # %s\n",x_keynote,x_sf_file_name,x_bank,x_preset,x_keynote,x_name);
+			} else {
+				if(x_keynote_from==x_keynote_to)
+					fprintf(x_out,"    %d %%font %s %d %d # %d:%s\n",x_preset,x_sf_file_name,x_bank,x_preset,x_keynote_from,x_name);
+				else
+					fprintf(x_out,"    %d %%font %s %d %d # %d-%d:%s\n",x_preset,x_sf_file_name,x_bank,x_preset,x_keynote_from,x_keynote_to,x_name);
+			}
+		}
+	}
+	x_pre_bank = x_bank;
+	x_pre_preset = x_preset;
+	return 0;
+}
+
+
+int32 control_ratio = 0;
+PlayMode *play_mode = NULL;
+int32 freq_table[1];
+FLOAT_T bend_fine[1];
+FLOAT_T bend_coarse[1];
+void pre_resample(Sample *sp) {}
+void antialiasing(int16 *data, int32 data_length,int32 sample_rate, int32 output_rate) {}
+char *event2string(int id) { return NULL; }
+int check_apply_control(void) { return 0; }
+char *wrdt = NULL; /* :-P */
+
+#ifdef WIN32
+static int ctl_open(int using_stdin, int using_stdout) { return 0;}
+static void ctl_close(void) {}
+static int ctl_read(int32 *valp) { return 0; } 
+#include <stdarg.h>
+static int cmsg(int type, int verbosity_level, char *fmt, ...)
+{
+  va_list ap;
+  if ((type==CMSG_TEXT || type==CMSG_INFO || type==CMSG_WARNING) &&
+      ctl->verbosity<verbosity_level)
+    return 0;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  fputs(NLS, stderr);
+  va_end(ap);
+  return 0;
+}
+static void ctl_event(CtlEvent *e) {}
+void dumb_pass_playing_list(int number_of_files, char *list_of_files[]) {}
+ControlMode w32gui_control_mode =
+{
+	"w32gui interface", 'd',
+    1,0,0,
+    0,
+    ctl_open,
+    ctl_close,
+    dumb_pass_playing_list,
+    ctl_read,
+    cmsg,
+    ctl_event
+};
+#endif
+extern struct URL_module URL_module_file;
+#ifndef __MACOS__
+extern struct URL_module URL_module_dir;
+#endif /* __MACOS__ */
+#ifdef SUPPORT_SOCKET
+extern struct URL_module URL_module_http;
+extern struct URL_module URL_module_ftp;
+extern struct URL_module URL_module_news;
+extern struct URL_module URL_module_newsgroup;
+#endif /* SUPPORT_SOCKET */
+#ifdef HAVE_POPEN
+extern struct URL_module URL_module_pipe;
+#endif /* HAVE_POPEN */
+static struct URL_module *url_module_list[] =
+{
+    &URL_module_file,
+#ifndef __MACOS__
+    &URL_module_dir,
+#endif /* __MACOS__ */
+#ifdef SUPPORT_SOCKET
+    &URL_module_http,
+    &URL_module_ftp,
+    &URL_module_news,
+    &URL_module_newsgroup,
+#endif /* SUPPORT_SOCKET */
+#if !defined(__MACOS__) && defined(HAVE_POPEN)
+    &URL_module_pipe,
+#endif
+#if defined(main) || defined(ANOTHER_MAIN)
+    /* You can put some other modules */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+#endif /* main */
+    NULL
+};
+int main(int argc, char **argv)
+{
+    SFInsts *sf;
+	int i, x_bank, x_preset, x_keynote;
+	int initial = 0;
+
+	if(argc<=1){
+		printf("USAGE: %s [-s[-]] soundfont [cfg_output]\n");
+		exit(-1);
+	}
+#ifndef strcasecmp
+#define strcasecmp stricmp
+#endif
+	if(strcasecmp(argv[1],"-s-")==0){
+		x_sort = 0;
+		argc--;
+		argv++;
+	} else if(strcasecmp(argv[1],"-s")==0){
+		x_sort = 1;
+		argc--;
+		argv++;
+	}
+	if(argc<=2){
+		x_out = stdout;
+	} else {
+		x_out = fopen(argv[2],"w");
+	}
+	ctl->verbosity = -1;
+#ifdef SUPPORT_SOCKET
+//	init_mail_addr();
+	if(url_user_agent == NULL){
+	    url_user_agent = (char *)safe_malloc(10 + strlen(timidity_version));
+	    strcpy(url_user_agent, "TiMidity-");
+	    strcat(url_user_agent, timidity_version);
+	}
+#endif /* SUPPORT_SOCKET */
+	for(i = 0; url_module_list[i]; i++)
+	    url_add_module(url_module_list[i]);
+	x_sf_file_name = argv[1];
+    sf = new_soundfont(x_sf_file_name);
+    sf->next = NULL;
+    sf->def_order = 2;
+    sfrecs = sf;
+	x_cfg_info_init();
+	init_sf(sf);
+	if(x_sort){
+	for(x_bank=0;x_bank<=127;x_bank++){
+		int flag = 0;
+		for(x_preset=0;x_preset<=127;x_preset++){
+			if(x_cfg_info.m_bank[x_bank][x_preset] >= 0 && x_cfg_info.m_preset[x_bank][x_preset] >= 0){
+				flag = 1;
+			}
+		}
+		if(!flag)
+			continue;
+		if(!initial){
+			initial = 1;
+			fprintf(x_out,"bank %d\n",x_bank);
+		} else
+			fprintf(x_out,"\nbank %d\n",x_bank);
+		for(x_preset=0;x_preset<=127;x_preset++){
+			if(x_cfg_info.m_bank[x_bank][x_preset] >= 0 && x_cfg_info.m_preset[x_bank][x_preset] >= 0){
+				if(x_cfg_info.m_rom[x_bank][x_preset])
+					fprintf(x_out,"#   %d %%font %s %d %d # (ROM)\n%s",x_preset,x_sf_file_name,x_cfg_info.m_bank[x_bank][x_preset],x_cfg_info.m_preset[x_bank][x_preset],x_cfg_info.m_str[x_bank][x_preset]);
+				else
+					fprintf(x_out,"    %d %%font %s %d %d\n%s",x_preset,x_sf_file_name,x_cfg_info.m_bank[x_bank][x_preset],x_cfg_info.m_preset[x_bank][x_preset],x_cfg_info.m_str[x_bank][x_preset]);
+			}
+		}
+	}
+	for(x_preset=0;x_preset<=127;x_preset++){
+		int flag = 0;
+		for(x_keynote=0;x_keynote<=127;x_keynote++){
+			if(x_cfg_info.d_preset[x_preset][x_keynote] >= 0 && x_cfg_info.d_keynote[x_preset][x_keynote] >= 0){
+				flag = 1;
+			}
+		}
+		if(!flag)
+			continue;
+		if(!initial){
+			initial = 1;
+			fprintf(x_out,"drumset %d\n",x_preset);
+		} else
+			fprintf(x_out,"\ndrumset %d\n",x_preset);
+		for(x_keynote=0;x_keynote<=127;x_keynote++){
+			if(x_cfg_info.d_preset[x_preset][x_keynote] >= 0 && x_cfg_info.d_keynote[x_preset][x_keynote] >= 0){
+				if(x_cfg_info.d_rom[x_preset][x_keynote])
+					fprintf(x_out,"#   %d %%font %s 128 %d %d #%s (ROM)\n",x_keynote,x_sf_file_name,x_cfg_info.d_preset[x_preset][x_keynote],x_cfg_info.d_keynote[x_preset][x_keynote],x_cfg_info.d_str[x_preset][x_keynote]);
+				else
+					fprintf(x_out,"    %d %%font %s 128 %d %d #%s\n",x_keynote,x_sf_file_name,x_cfg_info.d_preset[x_preset][x_keynote],x_cfg_info.d_keynote[x_preset][x_keynote],x_cfg_info.d_str[x_preset][x_keynote]);
+
+			}
+		}
+	}
+	}
+	if(x_out!=stdout)
+		fclose(x_out);
+	return 0;
+}
+
+#endif /* CFG_FOR_SF */

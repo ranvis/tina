@@ -1,9 +1,6 @@
-#ifndef ___CONTROLS_H_
-#define ___CONTROLS_H_
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -18,16 +15,24 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     controls.h
 */
 
+#ifndef ___CONTROLS_H_
+#define ___CONTROLS_H_
+
 #define RC_IS_SKIP_FILE(rc) ((rc) == RC_QUIT || (rc) == RC_LOAD_FILE || \
-			     (rc) == RC_NEXT || (rc) == RC_REALLY_PREVIOUS)
+			     (rc) == RC_NEXT || (rc) == RC_REALLY_PREVIOUS || \
+			     (rc) == RC_ERROR || (rc) == RC_STOP || \
+			     (rc) == RC_TUNE_END)
 
 /* Return values for ControlMode.read */
 #define RC_ERROR	-1
+#ifdef RC_NONE
+#undef RC_NONE
+#endif
 #define RC_NONE		0
 #define RC_QUIT		1
 #define RC_NEXT		2
@@ -57,6 +62,9 @@
 #define RC_CHANGE_REV_TIME 25
 #define RC_SYNC_RESTART 26
 #define RC_TOGGLE_CTL_SPEANA 27
+#define RC_CHANGE_RATE	28
+#define RC_OUTPUT_CHANGED      29
+#define RC_STOP		30	/* Stop to play */
 
 #define CMSG_INFO	0
 #define CMSG_WARNING	1
@@ -74,37 +82,58 @@
 #define VERB_DEBUG	3
 #define VERB_DEBUG_SILLY 4
 
-#define CTLE_NOW_LOADING	1
-#define CTLE_LOADING_DONE	2
-#define CTLE_PLAY_START		3
-#define CTLE_PLAY_END		4
-#define CTLE_TEMPO		5
-#define CTLE_METRONOME		6
-#define CTLE_CURRENT_TIME	7
-#define CTLE_NOTE		8
-#define CTLE_MASTER_VOLUME	9
-#define CTLE_PROGRAM		10
-#define CTLE_VOLUME		11
-#define CTLE_EXPRESSION		12
-#define CTLE_PANNING		13
-#define CTLE_SUSTAIN		14
-#define CTLE_PITCH_BEND		15
-#define CTLE_MOD_WHEEL		16
-#define CTLE_CHORUS_EFFECT	17
-#define CTLE_REVERB_EFFECT	18
-#define CTLE_LYRIC		19
-#define CTLE_REFRESH		20
-#define CTLE_RESET		21
-#define CTLE_SPEANA		22
+enum {
+    CTLE_NOW_LOADING,		/* v1:filename */
+    CTLE_LOADING_DONE,		/* v1:0=success -1=error 1=terminated */
+    CTLE_PLAY_START,		/* v1:nsamples */
+    CTLE_PLAY_END,
+    CTLE_TEMPO,			/* v1:tempo */
+    CTLE_METRONOME,		/* v1:count */
+    CTLE_CURRENT_TIME,		/* v1:secs, v2:voices */
+    CTLE_NOTE,			/* v1:status, v2:ch, v3:note, v4:velo */
+    CTLE_MASTER_VOLUME,		/* v1:amp(%) */
+    CTLE_PROGRAM,		/* v1:ch, v2:prog, v3:name, v4:bank,lsb.msb */
+    CTLE_VOLUME,		/* v1:ch, v2:value */
+    CTLE_EXPRESSION,		/* v1:ch, v2:value */
+    CTLE_PANNING,		/* v1:ch, v2:value */
+    CTLE_SUSTAIN,		/* v1:ch, v2:value */
+    CTLE_PITCH_BEND,		/* v1:ch, v2:value */
+    CTLE_MOD_WHEEL,		/* v1:ch, v2:value */
+    CTLE_CHORUS_EFFECT,		/* v1:ch, v2:value */
+    CTLE_REVERB_EFFECT,		/* v1:ch, v2:value */
+    CTLE_LYRIC,			/* v1:lyric-ID */
+    CTLE_REFRESH,
+    CTLE_RESET,
+    CTLE_SPEANA,		/* v1:double[] v2:len */
+    CTLE_PAUSE,			/* v1:pause on/off v2:time of pause */
+    CTLE_GSLCD,			/* GS L.C.D. */
+    CTLE_MAXVOICES,		/* v1:voices, Change voices */
+    CTLE_DRUMPART		/* v1:ch, v2:is_drum */
+};
 
 typedef struct _CtlEvent {
     int type;		/* See above */
     long v1, v2, v3, v4;/* Event value */
 } CtlEvent;
 
+
 typedef struct {
   char *id_name, id_character;
   int verbosity, trace_playing, opened;
+
+  uint32 flags;
+/* ControlMode flags.
+ * Some interfaces ignore these flags.
+ */
+#define CTLF_LIST_LOOP		(1u<<0)	/* -i?l */
+#define CTLF_LIST_RANDOM	(1u<<1)	/* -i?r */
+#define CTLF_LIST_SORT		(1u<<2)	/* -i?s */
+#define CTLF_AUTOSTART		(1u<<3)	/* -i?a */
+#define CTLF_AUTOEXIT		(1u<<4)	/* -i?x */
+#define CTLF_DRAG_START		(1u<<5)	/* -i?d */
+#define CTLF_AUTOUNIQ		(1u<<6)	/* -i?u */
+#define CTLF_AUTOREFINE		(1u<<7)	/* -i?R */
+#define CTLF_NOT_CONTINUE	(1u<<8)	/* -i?C */
 
   int  (*open)(int using_stdin, int using_stdout);
   void (*close)(void);

@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -24,6 +24,9 @@
     Macintosh mag loader
 */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,7 +116,7 @@ static void load_pixel(Mag_Header * mh, struct timidity_file *tf )
 				tf_read(&pixels, 1, 2, tf);
 				if( OUT_OF_DISP ) continue;
 				for( i=3; i>=0; i-- ){
-					*(uint8*)(&mh->bitMap[y*mh->rowBytes+x+i])= GCODE2INDEX(pixels & 0x000F);
+					*(uint8*)(&mh->bitMap[y*mh->rowBytes+x+i])= (pixels & 0x000F);
 					pixels >>= 4;
 				}
 			} else {
@@ -240,7 +243,7 @@ int mac_pho_load(const char* fn, PixMapHandle pm)
 	struct timidity_file	*tf;
 	Ptr		bitMap;
 
-	SET_G_COLOR(0);
+	SET_G_COLOR(0,graphicWorld[activeGraphics]);
 	PaintRect(&portRect);
 
 	if( (tf=wrd_open_file(fn))==0 )

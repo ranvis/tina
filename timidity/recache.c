@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,15 +15,14 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
 #include <stdio.h>
-#ifndef __WIN32__
+#ifndef __W32__
 #include <unistd.h>
 #endif
 #include <stdlib.h>
@@ -63,6 +61,70 @@ static MBlockList hash_entry_pool;
 #define CACHE_RESAMPLING_NOTOK	1
 #define INT32MAX 2147483647L /* (1LU<<31)-1 */
 
+#if defined(CSPLINE_INTERPOLATION)
+# define INTERPVARS_CACHE      int32   ofsd, v0, v1, v2, v3, temp;
+# define RESAMPLATION_CACHE \
+        v1 = (int32)src[(ofs>>FRACTION_BITS)]; \
+        v2 = (int32)src[(ofs>>FRACTION_BITS)+1]; \
+ 	if(((ofs-(1L<<FRACTION_BITS))<ls)||((ofs+(2L<<FRACTION_BITS))>le)){ \
+                dest[i] = (sample_t)(v1 + (((v2-v1) * (ofs & FRACTION_MASK)) >> FRACTION_BITS)); \
+ 	}else{ \
+		ofsd=ofs; \
+                v0 = (int32)src[(ofs>>FRACTION_BITS)-1]; \
+                v3 = (int32)src[(ofs>>FRACTION_BITS)+2]; \
+                ofs &= FRACTION_MASK; \
+	        temp=v2; \
+ 		v2 = (6*v2+((((5*v3 - 11*v2 + 7*v1 - v0)>>2)* \
+ 		     (ofs+(1L<<FRACTION_BITS))>>FRACTION_BITS)* \
+ 		     (ofs-(1L<<FRACTION_BITS))>>FRACTION_BITS)) \
+ 		     *ofs; \
+ 		v1 = (((6*v1+((((5*v0 - 11*v1 + 7*temp - v3)>>2)* \
+ 		     ofs>>FRACTION_BITS)*(ofs-(2L<<FRACTION_BITS)) \
+ 		     >>FRACTION_BITS))*((1L<<FRACTION_BITS)-ofs))+v2) \
+ 		     /(6L<<FRACTION_BITS); \
+ 		dest[i] = (v1 > 32767)? 32767: ((v1 < -32768)? -32768: v1); \
+		ofs = ofsd; \
+ 	}
+#elif defined(LAGRANGE_INTERPOLATION)
+# define INTERPVARS_CACHE      int32   ofsd, v0, v1, v2, v3;
+# define RESAMPLATION_CACHE \
+        v1 = (int32)src[(ofs>>FRACTION_BITS)]; \
+        v2 = (int32)src[(ofs>>FRACTION_BITS)+1]; \
+	if(((ofs-(1L<<FRACTION_BITS))<ls)||((ofs+(2L<<FRACTION_BITS))>le)){ \
+                dest[i] = (sample_t)(v1 + (((v2-v1) * (ofs & FRACTION_MASK)) >> FRACTION_BITS)); \
+	}else{ \
+                v0 = (int32)src[(ofs>>FRACTION_BITS)-1]; \
+                v3 = (int32)src[(ofs>>FRACTION_BITS)+2]; \
+                ofsd = (ofs & FRACTION_MASK) + (1L << FRACTION_BITS); \
+                v1 = v1*ofsd>>FRACTION_BITS; \
+                v2 = v2*ofsd>>FRACTION_BITS; \
+                v3 = v3*ofsd>>FRACTION_BITS; \
+                ofsd -= (1L << FRACTION_BITS); \
+                v0 = v0*ofsd>>FRACTION_BITS; \
+                v2 = v2*ofsd>>FRACTION_BITS; \
+                v3 = v3*ofsd>>FRACTION_BITS; \
+                ofsd -= (1L << FRACTION_BITS); \
+                v0 = v0*ofsd>>FRACTION_BITS; \
+                v1 = v1*ofsd>>FRACTION_BITS; \
+                v3 = v3*ofsd; \
+                ofsd -= (1L << FRACTION_BITS); \
+                v0 = (v3 - v0*ofsd)/(6L << FRACTION_BITS); \
+                v1 = (v1 - v2)*ofsd>>(FRACTION_BITS+1); \
+		v1 += v0; \
+		dest[i] = (v1 > 32767)? 32767: ((v1 < -32768)? -32768: v1); \
+	}
+#elif defined(LINEAR_INTERPOLATION)
+#   define RESAMPLATION_CACHE \
+      v1=src[ofs>>FRACTION_BITS];\
+      v2=src[(ofs>>FRACTION_BITS)+1];\
+      dest[i] = (sample_t)(v1 + (((v2-v1) * (ofs & FRACTION_MASK)) >> FRACTION_BITS));
+#  define INTERPVARS_CACHE int32 v1, v2;
+#else
+/* Earplugs recommended for maximum listening enjoyment */
+#  define RESAMPLATION_CACHE dest[i]=src[ofs>>FRACTION_BITS];
+#  define INTERPVARS_CACHE
+#endif
+
 static struct
 {
     int32 on[128];
@@ -92,8 +154,9 @@ struct cache_hash *resamp_cache_fetch(Sample *sp, int note)
 
     if(sp->vibrato_control_ratio ||
        (sp->modes & MODES_PINGPONG) ||
-       sp->sample_rate == 0)
-	return NULL;
+       (sp->sample_rate == play_mode->rate &&
+        sp->root_freq == freq_table[sp->note_to_use]))
+	    return NULL;
 
     addr = sp_hash(sp, note) % HASH_TABLE_SIZE;
     p = cache_hash_table[addr];
@@ -116,8 +179,9 @@ void resamp_cache_refer_on(Voice *vp, int32 sample_start)
        channel[ch].portamento ||
        (vp->sample->modes & MODES_PINGPONG) ||
        vp->orig_frequency != vp->frequency ||
-       vp->sample->sample_rate == 0)
-	return;
+       (vp->sample->sample_rate == play_mode->rate &&
+        vp->sample->root_freq == freq_table[vp->sample->note_to_use]))
+	    return;
 
     note = vp->note;
 
@@ -155,7 +219,8 @@ void resamp_cache_refer_off(int ch, int note, int32 sample_end)
 	return;
 
     sp = p->sp;
-    if(sp->sample_rate == 0)
+    if(sp->sample_rate == play_mode->rate &&
+       sp->root_freq == freq_table[sp->note_to_use])
 	return;
     sample_start = channel_note_table[ch].on[note];
 
@@ -171,9 +236,9 @@ void resamp_cache_refer_off(int ch, int note, int32 sample_end)
 	double a;
 	int32 slen;
 
-	a = ((double)sp->sample_rate * freq_table[note]) /
-	    ((double)sp->root_freq * play_mode->rate);
-	slen = (int32)((sp->data_length >> FRACTION_BITS) / a);
+	a = ((double)sp->root_freq * play_mode->rate) /
+	    ((double)sp->sample_rate * freq_table[note]);
+	slen = (int32)((sp->data_length >> FRACTION_BITS) * a);
 	if(len > slen)
 	    len = slen;
     }
@@ -345,31 +410,29 @@ static int cache_resampling(struct cache_hash *p)
     {
 	for(i = 0; i < newlen; i++)
 	{
-	    int32 j, v1, v2;
+	    int32 j;
+	    INTERPVARS_CACHE
 
 	    if(ofs >= le)
 		ofs -= ll;
 	    j = ofs>>FRACTION_BITS;
 	    v1 = src[j];
 	    v2 = src[j + 1];
-	    dest[i] = (sample_t)(v1 + (((v2 - v1) *
-					(ofs & FRACTION_MASK))
-				       >> FRACTION_BITS));
+	    RESAMPLATION_CACHE
 	    ofs += incr;
 	}
     }
     else
     {
-	
 	for(i = 0; i < newlen; i++)
 	{
-	    int32 j, v1, v2;
+	    int32 j;
+	    INTERPVARS_CACHE
+	    
 	    j = ofs>>FRACTION_BITS;
 	    v1 = src[j];
 	    v2 = src[j + 1];
-	    dest[i] = (sample_t)(v1 + (((v2 - v1) *
-					(ofs & FRACTION_MASK))
-				       >> FRACTION_BITS));
+	    RESAMPLATION_CACHE
 	    ofs += incr;
 	}
     }

@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 	
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -24,6 +24,9 @@
     Macintosh control mode
 */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +52,9 @@
 #include "mac_main.h"
 #include "mac_util.h"
 #include "mac_c.h"
+#ifdef MAC_USE_OMS
+#include "mac_oms.h"
+#endif
 
 // *******************************
 
@@ -80,9 +86,10 @@ ControlMode ctl=
 {
   "mac interface", 'm',
   1,1,0,
+  0,
   ctl_open,
   ctl_close,
-  dumb_pass_playing_list,
+  ctl_pass_playing_list,
   ctl_read,
   cmsg,
   ctl_event
@@ -90,7 +97,9 @@ ControlMode ctl=
 
 // ***********************************************
 Boolean	gCursorIsWatch, gHasDragMgr;
-char	fileStr[40]="", timeStr[10]="";
+#define FILESTR_LEN 40
+#define TIMESTR_LEN 10
+char	fileStr[FILESTR_LEN]="", timeStr[TIMESTR_LEN]="";
 Rect	rFileName={10,10, 26,140},
 		rTime={10,150, 26,200},
 		rLogo={38,5,94,98},
@@ -107,8 +116,7 @@ Rect	rFileName={10,10, 26,140},
 PicHandle	logo, logoDown;
 static RgnHandle	receiveRgn;
 CIconHandle	button[6], iconPlay, iconPause, iconVol, iconTab, iconNotLoop,iconLoop;
-static TEHandle	gLogTE=0,
-				gDocTE=0;
+static TEHandle	gLogTE=0,gDocTE=0;
 
 /****************************************/
 static Boolean	recieveHiliting;
@@ -364,7 +372,7 @@ static int open_PlayerWin()
 
 static void click_PlayerWin(Point p, short /*modifiers*/)
 {
-			if( PtInRect(p, &rStop)){ mac_rc=RC_QUIT; ctl_current_time(0,0); }
+		if( PtInRect(p, &rStop)){ mac_rc=RC_QUIT; ctl_current_time(0,0); }
 	else	if( PtInRect(p, &rPlay)){ mac_rc=RC_CONTINUE; }
 	else	if( PtInRect(p, &rPause)){ mac_rc=RC_TOGGLE_PAUSE; }
 	else	if( PtInRect(p, &rPrevious)){ mac_rc=RC_PREVIOUS;  }
@@ -853,6 +861,7 @@ static void mac_AdjustMenus(short modifiers)
 	if( modifiers & optionKey ){
 		//EnableItem(filenemu, iSkinWindow);
 		EnableItem(synthemu, iQuickTime);
+		EnableItem(synthemu, iOMS);
 	}
 }
 
@@ -871,7 +880,7 @@ void HandleMouseDown(EventRecord *event)
 	{
 	case inMenuBar:
 		mac_AdjustMenus(event->modifiers);
-		mac_HandleMenuSelect(MenuSelect(event->where));
+		mac_HandleMenuSelect(MenuSelect(event->where), event->modifiers);
 		HiliteMenu(0);
 		break;
 	case inContent:
@@ -936,6 +945,37 @@ static void ctl_close(void)
 	return;
 }
 
+
+static void ctl_pass_playing_list(int init_number_of_files,
+				  char * /*init_list_of_files*/ [])
+{
+	EventRecord	event;
+
+	if( init_number_of_files!=0 ){
+		cmsg(CMSG_FATAL, VERB_NORMAL,
+		  "ctl_pass_playing_list: Sorry. Fatal error.");
+	}
+	
+#ifdef MAC_USE_OMS
+	mac_oms_setup();
+#endif
+	
+	{
+		FSSpec	spec;
+		OSErr	err;
+		err=FSMakeFSSpec(0, 0, MAC_STARTUP_FOLDER_NAME, &spec);
+		if( err==noErr ){ mac_add_fsspec( &spec ); }
+	}
+	
+	gQuit=false;
+	while(!gQuit)
+	{
+		WaitNextEvent(everyEvent, &event, 1,0);
+		mac_HandleEvent(&event);
+	}	
+	DoQuit();
+}
+
 static Boolean UserWantsControl()
 {
 	/* Mouse down¡¤or key down¡¥*/
@@ -943,7 +983,7 @@ static Boolean UserWantsControl()
 
 	GetKeys(km);
 	km[1] &= ~0x02; /* exclude caps lock */
-	return Button() || km[0]|| km[1] || km[2] || km[3];
+	return   Button() || km[0]|| km[1] || km[2] || km[3] || skin_state==PAUSE;
 }
 
 static int ctl_read(int32* /*valp*/)
@@ -952,16 +992,61 @@ static int ctl_read(int32* /*valp*/)
 	
 	//if( gCursorIsWatch ){ gCursorIsWatch=false; InitCursor(); }
 	if( gQuit ) DoQuit();	/* Quit Apple event occured */
+	if( mac_rc ){ret=mac_rc; mac_rc=0; return ret;}
 	if( !gBusy || UserWantsControl()){
 		YieldToAnyThread();
 	}
-	if( mac_rc ){ret=mac_rc; mac_rc=0; return ret;}
 	return RC_NONE;
+}
+
+static void ctl_lyric(int lyricid)
+{
+	char *lyric;
+
+	lyric = event2string(lyricid);
+	if(lyric == NULL) return;
+	ctl.cmsg(CMSG_TEXT, VERB_VERBOSE, "%s", lyric + 1);
+}
+
+static void ctl_gslcd(int lyricid)
+{
+	char *lyric;
+
+	lyric = event2string(lyricid);
+	if(lyric == NULL) return;
+	
+	if( lyric[0] == ME_GSLCD ){
+		int i,j, data, mask;
+		char tmp[3]= "00";
+		
+		lyric++;
+		for( j=0; j<4; j++ ){
+		for( i=0; i<16; i++ ){
+			tmp[0]= lyric[0]; tmp[1]= lyric[1]; lyric+=2;
+			sscanf(tmp, "%X", &data);
+			mask=0x10;
+			ctl_note((data&mask)? VOICE_ON:-1, i, 40+j*10, 127);
+			ctl_note((data&mask)? VOICE_ON:-1, i, 41+j*10, 127); mask>>=1;
+			ctl_note((data&mask)? VOICE_ON:-1, i, 42+j*10, 127);
+			ctl_note((data&mask)? VOICE_ON:-1, i, 43+j*10, 127); mask>>=1;
+			ctl_note((data&mask)? VOICE_ON:-1, i, 44+j*10, 127);
+			ctl_note((data&mask)? VOICE_ON:-1, i, 45+j*10, 127); mask>>=1;
+			ctl_note((data&mask)? VOICE_ON:-1, i, 46+j*10, 127);
+			ctl_note((data&mask)? VOICE_ON:-1, i, 47+j*10, 127); mask>>=1;
+			ctl_note((data&mask)? VOICE_ON:-1, i, 48+j*10, 127);
+			ctl_note((data&mask)? VOICE_ON:-1, i, 49+j*10, 127); mask>>=1;
+		}
+		}
+		return;
+	}
+	//else normal text
+	ctl.cmsg(CMSG_TEXT, VERB_VERBOSE, "%s", lyric + 1);
 }
 
 static int cmsg(int type, int verbosity_level, char * fmt, ...)
 {
-  char	buf[1024];
+#define BUFSIZE 1024
+  char	buf[BUFSIZE];
   va_list ap;
 
   if ((type==CMSG_TEXT || type==CMSG_INFO || type==CMSG_WARNING) &&
@@ -970,7 +1055,7 @@ static int cmsg(int type, int verbosity_level, char * fmt, ...)
 	}
   va_start(ap, fmt);
     {
-    	vsprintf(buf, fmt, ap);
+    	vsnprintf(buf, BUFSIZE, fmt, ap);
 		if(mac_LogWindow.ref ){
 			PrintLogStr(buf);
 			PrintLogStr("\r");
@@ -988,7 +1073,7 @@ static void ctl_refresh(void)
 
 static void ctl_total_time(int tt)
 {
-	mac_trc_update_time( tt/play_mode->rate);
+	mac_trc_update_time( -1, tt/play_mode->rate);
 	mac_SkinWindow.message(MW_SKIN_TOTAL_TIME, tt/play_mode->rate);
 }
 
@@ -996,7 +1081,7 @@ static void ctl_master_volume(int /*mv*/) {}
 
 static void ctl_file_name(char *name)
 {
-	int		i;
+	int	i;
 	char	*s;
 	
 	for( i=strlen(name); i>=0; i--)
@@ -1004,8 +1089,7 @@ static void ctl_file_name(char *name)
 			s=&name[i]+1; //remove pathname
 			break;
 		}
-	//sprintf(fileStr, "%d/%d %s", nPlaying+1, mac_n_files, s);
-	sprintf(fileStr, "%d. %s", nPlaying+1, s);
+	snprintf(fileStr, FILESTR_LEN, "%d. %s", nPlaying+1, s);
 	
 	if (ctl.verbosity>=0 || ctl.trace_playing){
 		DrawFileStr();
@@ -1016,30 +1100,29 @@ static void ctl_file_name(char *name)
 	mac_SkinWindow.message(MW_SKIN_FILENAME, (long)fileStr);
 }
 
-static void ctl_current_time(int /*ct*/, int /*v*/)
+static void ctl_current_time(int current, int /*v*/)
 {
 	static int	lastSec=-1, lastYieldThread=-1;
 	int			mins, secs, realSecs;
-	int32		current=play_mode->current_samples();
 	
 	if( gStartTick==0 ) gStartTick=TickCount();
-										/*select*/
+						/*select*/
 	realSecs=(TickCount()-gStartTick)/60; /*real time*/
-	secs=current/play_mode->rate;
-	
+	secs=current;
+
 	if( secs!=lastSec && (skin_state==PLAYING || skin_state==PAUSE))
 	{
 		lastSec=secs;
 		mins=secs/60;
 		secs-=mins*60;
-		sprintf(timeStr, "%02d:%02d", mins, secs);
+		snprintf(timeStr, TIMESTR_LEN, "%02d:%02d", mins, secs);
 		DrawTimeStr();
-		mac_trc_update_time(-1);
+		mac_trc_update_time(current,-1);
 		mac_SkinWindow.message(MW_SKIN_TIME, lastSec);
 	}
 	if( realSecs!=lastYieldThread ){
 		lastYieldThread= realSecs;
-		mac_trc_update_time(-1);
+		mac_trc_update_time(current,-1);
 		mac_trc_update_voices();
 		if( (realSecs % (evil_level*evil_level))==0 )
 			YieldToAnyThread();		// YieldToAnyThread every 1sec
@@ -1129,7 +1212,10 @@ static void ctl_event(CtlEvent *e)
       case CTLE_REVERB_EFFECT:
 	break;
       case CTLE_LYRIC:
-	default_ctl_lyric((int)e->v1);
+	ctl_lyric((int)e->v1);
+	break;
+      case CTLE_GSLCD:
+	ctl_gslcd((int)e->v1);
 	break;
       case CTLE_REFRESH:
 	ctl_refresh();
@@ -1137,6 +1223,11 @@ static void ctl_event(CtlEvent *e)
       case CTLE_RESET:
 	ctl_reset();
 	break;
+#ifdef SUPPORT_SOUNDSPEC
+      case CTLE_SPEANA:
+        ctl_speana_data((double *)e->v1, (int)e->v2);
+      break;
+#endif /* SUPPORT_SOUNDSPEC */
     }
 }
 

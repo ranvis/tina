@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
@@ -196,6 +194,17 @@ int audriv_get_play_output(void)
  */
 {
     return output_port;
+}
+
+#ifdef CFG_FOR_SF
+static int record_volume = 0;
+#endif
+int audriv_get_record_volume(void)
+/* 録音音量を 0 〜 255 内で得ます．0 は無音，255 は最大音量．
+ * 失敗すると -1 を返し，そうでない場合は 0 〜 255 内の音量を返します．
+ */
+{
+    return record_volume;
 }
 
 int audriv_write(char *buff, int n)

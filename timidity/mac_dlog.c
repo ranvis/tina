@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -24,6 +24,9 @@
     Preference dialog
 */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include	<stdio.h>
 #include	<stdlib.h>
 #include	<string.h>
@@ -37,6 +40,9 @@
 
 #include	"mac_main.h"
 #include	"mac_util.h"
+
+extern int effect_lr_mode;
+
 
 void mac_DefaultOption()
 {
@@ -60,21 +66,31 @@ void mac_DefaultOption()
 	opt_modulation_wheel = 1;
 	opt_portamento = 1;
 	opt_nrpn_vibrato = 1;
+#ifdef REVERB_CONTROL_ALLOW
+	opt_reverb_control = 1;
+#else
 	opt_reverb_control = 0;
+#endif
+#ifdef CHORUS_CONTROL_ALLOW
+	opt_chorus_control = 1;
+#else
 	opt_chorus_control = 0;
+#endif
+	opt_surround_chorus = 0;
 	opt_channel_pressure = 0;
 	opt_trace_text_meta_event = 0;
 	opt_overlap_voice_allow = 1;
-	do_reverb_flag = 0;
 	
-	presence_balance=PRESENCE_HACK+0;
+	effect_lr_mode=-1; //no effect
 	modify_release=0;
 	opt_default_mid=0x7e; //GM
 	
-	readmidi_wrd_flag=1;
+	readmidi_wrd_mode=1;
 	
 	evil_level=EVIL_NORMAL;
-	do_initial_filling=1;
+	do_initial_filling=0;
+	reduce_voice_threshold = 0;
+	auto_reduce_polyphony = 0;
 }
 
 enum{iOK=1, iCancel=2, iDefault=3, iRate=5, iMono=6, iStereo=7,
@@ -84,25 +100,100 @@ enum{iOK=1, iCancel=2, iDefault=3, iRate=5, iMono=6, iStereo=7,
 			iModulation_wheel = 21,
 			iPortamento = 22,
 			iNrpn_vibrato = 23,
+			
 			iReverb = 24,
+			iReverb_setlevel = 38,
+			iReverb_level = 39,
+			iReverb_level_hint = 42,
+						
 			iChorus = 25,
+			iChorus_setlevel = 40,
+			iChorus_level = 41,
+			iChorus_level_hint = 43,
+			
 			iChannel_pressure = 26,
 			iText_meta_event = 27,
 			iOverlap_voice = 28,
-			iPReverb = 29,
-			iModify_release=30,
+			/*iPReverb = 29,*/
+			
+			iModify_release=31,
+			iModify_release_ms=37,
+			iModify_release_ms_hint1=30,			
+			iModify_release_ms_hint2=44,
+			iModify_release_ms_hint3=45,
+			
 			iPresence_balance=32,
 			iManufacture=33,
 			iEvil_level=34,
-			iDo_initial_filling=35,
+			/*iDo_initial_filling=35,*/
 			iShuffle= 36
 			};
 
+// ******************************************
+
+static void mac_AdjustDialog( DialogRef dialog )
+{
+	//reverb
+	if( GetDialogItemValue(dialog, iReverb)==2 ){
+		SetDialogItemHilite(dialog, iReverb_setlevel, kControlNoPart);
+	}else{
+		SetDialogItemHilite(dialog, iReverb_setlevel, kControlInactivePart);
+		SetDialogItemValue(dialog, iReverb_setlevel, 0);
+	}
+
+	if( GetDialogItemValue(dialog, iReverb_setlevel) )
+	{
+		ShowDialogItem(dialog, iReverb_level);
+		ShowDialogItem(dialog, iReverb_level_hint);						
+	}else{
+		HideDialogItem(dialog, iReverb_level);
+		HideDialogItem(dialog, iReverb_level_hint);						
+	}
+	//chorus
+	if( GetDialogItemValue(dialog, iChorus)==2 ){
+		// activate
+		SetDialogItemHilite(dialog, iChorus_setlevel, kControlNoPart);
+		mySetDialogItemText(dialog, iChorus_level_hint, "\p(1..127)");
+	}else if( GetDialogItemValue(dialog, iChorus)==3 ){
+		// activate
+		SetDialogItemHilite(dialog, iChorus_setlevel, kControlNoPart);
+		mySetDialogItemText(dialog, iChorus_level_hint, "\p(1..63)");
+	}else{	// inactivate
+		SetDialogItemHilite(dialog, iChorus_setlevel, kControlInactivePart);
+		SetDialogItemValue(dialog, iChorus_setlevel, 0);
+	}
+	
+	if( GetDialogItemValue(dialog, iChorus_setlevel) )
+	{
+		ShowDialogItem(dialog, iChorus_level);
+		ShowDialogItem(dialog, iChorus_level_hint);
+	}else{
+		HideDialogItem(dialog, iChorus_level);
+		HideDialogItem(dialog, iChorus_level_hint);
+	}
+	
+	// modify release
+	if( GetDialogItemValue(dialog, iModify_release) )
+	{
+		ShowDialogItem(dialog, iModify_release_ms);
+		ShowDialogItem(dialog, iModify_release_ms_hint1);
+		ShowDialogItem(dialog, iModify_release_ms_hint2);
+		ShowDialogItem(dialog, iModify_release_ms_hint3);
+	}else{
+		HideDialogItem(dialog, iModify_release_ms);
+		HideDialogItem(dialog, iModify_release_ms_hint1);
+		HideDialogItem(dialog, iModify_release_ms_hint2);
+		HideDialogItem(dialog, iModify_release_ms_hint3);
+	}
+}
+
 // ***************************************************
+
 static void SetDialogValue(DialogRef theDialog)
 {
+#define BUFSIZE 80
 	short	value;
-	char	buf[80];
+	char	buf[BUFSIZE];
 	Str255		s;
 	
 	SetDialogItemValue(theDialog, iStereo, !(play_mode->encoding & PE_MONO));
@@ -118,7 +209,7 @@ static void SetDialogValue(DialogRef theDialog)
 	SelectDialogItemText(theDialog, iVoices, 0, 32000);
 	NumToString(control_ratio, s);
 	mySetDialogItemText(theDialog, iControlRaio, s);
-	sprintf(buf,"%g",gSilentSec); /*use s as C string*/
+	snprintf(buf, BUFSIZE, "%g",gSilentSec); /*use s as C string*/
 	mySetDialogItemText(theDialog, iSilent, c2pstr(buf));
 
 	SetDialogItemValue(theDialog, iFastDecay, fast_decay);
@@ -126,26 +217,72 @@ static void SetDialogValue(DialogRef theDialog)
 	SetDialogItemValue(theDialog, iModulation_wheel, opt_modulation_wheel);
 	SetDialogItemValue(theDialog, iPortamento, opt_portamento);
 	SetDialogItemValue(theDialog, iNrpn_vibrato, opt_nrpn_vibrato);
-	SetDialogItemValue(theDialog, iReverb, opt_reverb_control);
-	SetDialogItemValue(theDialog, iChorus, opt_chorus_control);
 	SetDialogItemValue(theDialog, iChannel_pressure, opt_channel_pressure);
 	SetDialogItemValue(theDialog, iText_meta_event, opt_trace_text_meta_event);
 	SetDialogItemValue(theDialog, iOverlap_voice, opt_overlap_voice_allow);
-	SetDialogItemValue(theDialog, iPReverb, do_reverb_flag);
 	
-	SetDialogItemValue(theDialog, iModify_release,  modify_release+1);
-	SetDialogItemValue(theDialog, iPresence_balance, presence_balance+2);
+	/*-----reverb-----*/
+	if( opt_reverb_control<0 ){ //Enabel
+		SetDialogItemValue(theDialog, iReverb, 2);
+		SetDialogItemValue(theDialog, iReverb_setlevel, 1);
+		SetDialogItemHilite(theDialog, iReverb_setlevel, kControlNoPart);
+		SetDialogTEValue(theDialog, iReverb_level, -opt_reverb_control);
+		
+	}else if( opt_reverb_control==0 || opt_reverb_control==2 ){ //Non or global
+		SetDialogItemValue(theDialog, iReverb, opt_reverb_control+1);
+		SetDialogItemValue(theDialog, iReverb_setlevel, 1);
+		SetDialogItemHilite(theDialog, iReverb_setlevel, kControlInactivePart);
+	}else{	// opt_reverb_control==1, no level
+		SetDialogItemValue(theDialog, iReverb, 2);
+		SetDialogItemValue(theDialog, iReverb_setlevel, 0);
+		SetDialogItemHilite(theDialog, iReverb_setlevel, kControlNoPart);
+	}
+	
+	/*-----chorus-----*/
+	if( opt_surround_chorus ){
+		SetDialogItemValue(theDialog, iChorus, 3); //surround
+	}else if( opt_chorus_control<0 || opt_chorus_control==1 ){
+		SetDialogItemValue(theDialog, iChorus, 2); //Enable
+		SetDialogItemHilite(theDialog, iChorus_setlevel, kControlNoPart);
+	}else{
+		SetDialogItemValue(theDialog, iChorus, 1); //Non
+		SetDialogItemHilite(theDialog, iChorus_setlevel, kControlInactivePart);
+	}
+	
+	if( opt_chorus_control<0 ){
+		SetDialogItemHilite(theDialog, iChorus_setlevel, kControlNoPart);
+		SetDialogItemValue(theDialog, iChorus_setlevel, 1);
+		SetDialogTEValue(theDialog, iChorus_level, -opt_chorus_control);
+	}else{
+		SetDialogItemValue(theDialog, iChorus_setlevel, 0);
+	}
+	
+	/*-----modify_release-----*/
+	SetDialogItemValue(theDialog, iModify_release,  (modify_release!=0) );
+	SetDialogTEValue(theDialog, iModify_release_ms, modify_release);
+	
+	SetDialogItemValue(theDialog, iPresence_balance, effect_lr_mode+2);
 	value= (	opt_default_mid==0x41? 1:           //GS
 				opt_default_mid==0x43? 2:3	);		//XG:GM
 	SetDialogItemValue(theDialog, iManufacture, value);
 	SetDialogItemValue(theDialog, iEvil_level, evil_level);
-	SetDialogItemValue(theDialog, iDo_initial_filling, do_initial_filling);
+	//SetDialogItemValue(theDialog, iDo_initial_filling, do_initial_filling);
 	SetDialogItemValue(theDialog, iShuffle, gShuffle);
+	
+	mac_AdjustDialog( theDialog );
 }
 
-//*******************************************
-//					mac_SetPlayOption
-//*******************************************
+static int mac_limit_params(int var, int min_limit, int max_limit)
+{
+	if( var < min_limit ) var = min_limit;
+	if( var > max_limit ) var = max_limit;
+	return var;
+}
+
+
+// *******************************************
+//	mac_SetPlayOption
+// *******************************************
 OSErr mac_SetPlayOption()
 {
 	Boolean		more=false;
@@ -222,20 +359,71 @@ OSErr mac_SetPlayOption()
 					opt_modulation_wheel=		GetDialogItemValue(dialog, iModulation_wheel)? 1:0;
 					opt_portamento=				GetDialogItemValue(dialog, iPortamento)? 1:0;
 					opt_nrpn_vibrato=			GetDialogItemValue(dialog, iNrpn_vibrato)? 1:0;
-					opt_reverb_control=			GetDialogItemValue(dialog, iReverb)? 1:0;
-					opt_chorus_control=			GetDialogItemValue(dialog, iChorus)? 1:0;
 					opt_channel_pressure=		GetDialogItemValue(dialog, iChannel_pressure)? 1:0;
 					opt_trace_text_meta_event=	GetDialogItemValue(dialog, iText_meta_event)? 1:0;
 					opt_overlap_voice_allow=	GetDialogItemValue(dialog, iOverlap_voice)? 1:0;
-					do_reverb_flag=				GetDialogItemValue(dialog, iPReverb)? 1:0;
 					
-					modify_release= 	GetDialogItemValue(dialog, iModify_release)-1;
-					presence_balance=	GetDialogItemValue(dialog, iPresence_balance)-2;
+					/*-----reverb-----*/
+					switch(GetDialogItemValue(dialog, iReverb))
+					{
+					  case 1:
+					    opt_reverb_control = 0;
+					    break;
+					  case 2:
+					    if(GetDialogItemValue(dialog, iReverb_setlevel))
+						opt_reverb_control =
+							- (mac_limit_params( GetDialogTEValue( dialog, iReverb_level ), 1, 127));
+					    else
+						opt_reverb_control = 1;
+					    break;
+					  case 3:
+					    opt_reverb_control = 2;
+					    break;
+					  /*default:
+					    ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
+						      "Invalid -EFreverb parameter.");*/
+					}
+					
+					/*-----chorus-----*/
+					opt_surround_chorus = 0;
+					switch(GetDialogItemValue(dialog, iChorus))
+					{
+					  case 1:
+					    opt_chorus_control = 0;
+					    break;
+
+					  case 2:
+					    if( GetDialogItemValue(dialog, iChorus_setlevel) )
+						opt_chorus_control =
+							- (mac_limit_params( GetDialogTEValue(dialog,iChorus_level), 1, 127 ) );
+					    else
+						opt_chorus_control = 1;
+					    break;
+					  case 3:
+						opt_surround_chorus = 1;
+					    	if( GetDialogItemValue(dialog, iChorus_setlevel) )
+							opt_chorus_control =
+								- (mac_limit_params( GetDialogTEValue(dialog,iChorus_level), 1,63));
+					  	else
+							opt_chorus_control = 1;
+						break;
+					  /*default:
+					    ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
+						      "Invalid -EFchorus parameter.");
+					    return 1;*/
+					}
+					
+					modify_release=0;
+					if( GetDialogItemValue(dialog, iModify_release) ){
+						modify_release=GetDialogTEValue(dialog, iModify_release_ms);
+						modify_release = mac_limit_params(modify_release, 0, 5000);
+					}
+					effect_lr_mode=	GetDialogItemValue(dialog, iPresence_balance)-2;
 					value=GetDialogItemValue(dialog, iManufacture);
 					opt_default_mid= 	(value==1? 0x41:		//GS
 										 value==2? 0x43:0x7e);	//XG:GM
 					evil_level= 		GetDialogItemValue(dialog, iEvil_level);
-					do_initial_filling=	GetDialogItemValue(dialog, iDo_initial_filling)? 1:0;
+					//do_initial_filling=	GetDialogItemValue(dialog, iDo_initial_filling)? 1:0;
 					gShuffle=			GetDialogItemValue(dialog, iShuffle)? 1:0;
 					
 					DisposeDialog(theDialog);
@@ -280,13 +468,32 @@ OSErr mac_SetPlayOption()
 				case iModulation_wheel:	ToggleDialogItem(dialog, iModulation_wheel);	break;
 				case iPortamento:		ToggleDialogItem(dialog, iPortamento);	break;
 				case iNrpn_vibrato:		ToggleDialogItem(dialog, iNrpn_vibrato);	break;
-				case iReverb:			ToggleDialogItem(dialog, iReverb);	break;
-				case iChorus:			ToggleDialogItem(dialog, iChorus);	break;
 				case iChannel_pressure:	ToggleDialogItem(dialog, iChannel_pressure);	break;
 				case iText_meta_event:	ToggleDialogItem(dialog, iText_meta_event);	break;
 				case iOverlap_voice:	ToggleDialogItem(dialog, iOverlap_voice);	break;
-				case iPReverb:			ToggleDialogItem(dialog, iPReverb);	break;
-				case iDo_initial_filling:	ToggleDialogItem(dialog, iDo_initial_filling);	break;
+
+				case iReverb:
+					mac_AdjustDialog(dialog);
+					break;
+				case iReverb_setlevel:
+					ToggleDialogItem(dialog, iReverb_setlevel);
+					mac_AdjustDialog(dialog);
+					break;
+				case iChorus:
+					mac_AdjustDialog(dialog);
+					break;
+
+				case iChorus_setlevel:
+					ToggleDialogItem(dialog, iChorus_setlevel);
+					mac_AdjustDialog(dialog);
+					break;
+				case iModify_release:
+					ToggleDialogItem(dialog, iModify_release);
+					if( GetDialogItemValue(dialog, iModify_release) ){ //newly checked on
+						SetDialogTEValue(theDialog, iModify_release_ms, DEFAULT_MREL);
+					}
+					mac_AdjustDialog(dialog);
+					break;
 				case iShuffle:			ToggleDialogItem(dialog, iShuffle);	break;
 				}
 			}
@@ -313,23 +520,24 @@ struct{
 	int32	controlratio;
 	double	silentsec;
 	int32	modify_release;
-	int		presence_balance;
+	int		effect_lr_mode;
 	int		opt_default_mid;
-	char	showMsg, showList, showWrd, showDoc, showSpec, showTrace, showSkin,
+	int		showMsg, showList, showWrd, showDoc, showSpec, showTrace, showSkin,
 			modulation_wheel, portamento, nrpn_vibrato, reverb_control,
-			chorus_control, channel_pressure,
+			chorus_control, surround_chorus, channel_pressure,
 			xg_bank_select_lsb, trace_text_meta_event, overlap_voice_allow,
 			do_reverb_flag;
 	int		evil_level,do_initial_filling;
 	int		gShuffle;
 	char	skin_mainfile[256];
+	char	wrdfontname[256];
 	char	rsv[256];
 }Preference;
 
 
-#define	PREF_VER	11
-									/* Mac release 3.24->prefver=11 */
-									/* Mac release 3.07,3.08->prefver=10 */
+#define	PREF_VER	14
+						/* ++ 2.6.1        ->prefver=14 */
+						/* ++ 2.1.0        ->prefver=13 */
 #define	PREF_NUM	(sizeof(Preference))	/*pref data bytes*/
 
 OSErr mac_GetPreference()
@@ -403,7 +611,7 @@ OSErr mac_GetPreference()
 	control_ratio=					Preference.controlratio;
 	gSilentSec=						Preference.silentsec;
 	modify_release=					Preference.modify_release;
-	presence_balance=				Preference.presence_balance;
+	effect_lr_mode=					Preference.effect_lr_mode;
 	opt_default_mid=				Preference.opt_default_mid;
 	
 	mac_LogWindow.show=				Preference.showMsg;
@@ -419,10 +627,10 @@ OSErr mac_GetPreference()
 	opt_nrpn_vibrato =			Preference.nrpn_vibrato;
 	opt_reverb_control =		Preference.reverb_control;
 	opt_chorus_control =		Preference.chorus_control;
+	opt_surround_chorus = 		Preference.surround_chorus;
 	opt_channel_pressure =		Preference.channel_pressure;
 	opt_trace_text_meta_event =	Preference.trace_text_meta_event;
 	opt_overlap_voice_allow =	Preference.overlap_voice_allow;
-	do_reverb_flag =			Preference.do_reverb_flag;
 	evil_level=					Preference.evil_level;
 	do_initial_filling=			Preference.do_initial_filling;
 	gShuffle=					Preference.gShuffle;
@@ -489,7 +697,7 @@ OSErr mac_SetPreference()
 	Preference.controlratio=	control_ratio;
 	Preference.silentsec=		gSilentSec;
 	Preference.modify_release=	modify_release;
-	Preference.presence_balance=presence_balance;
+	Preference.effect_lr_mode=	effect_lr_mode;
 	Preference.opt_default_mid=	opt_default_mid;
 
 	Preference.showMsg=			mac_LogWindow.show;
@@ -507,7 +715,6 @@ OSErr mac_SetPreference()
 	Preference.channel_pressure=	opt_channel_pressure;
 	Preference.trace_text_meta_event=opt_trace_text_meta_event;
 	Preference.overlap_voice_allow=	opt_overlap_voice_allow;
-	Preference.do_reverb_flag=		do_reverb_flag;
 	Preference.evil_level=			evil_level;
 	Preference.do_initial_filling=	do_initial_filling;
 	Preference.gShuffle=			gShuffle;

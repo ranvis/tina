@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     xaw_i.c - XAW Interface
 	from Tomokazu Harada <harada@prince.pe.u-tokyo.ac.jp>
@@ -41,7 +40,7 @@
 #include <pwd.h>
 #include <sys/stat.h>
 #include "xaw.h"
-#include <X11/Intrinsic.h>
+#include <X11/IntrinsicP.h>
 #include <X11/StringDefs.h>
 #include <X11/Xaw/Form.h>
 #include <X11/Xaw/Box.h>
@@ -199,13 +198,13 @@ typedef struct {
 void a_print_text(Widget,char *);
 static void drawProg(int,int,int,int,Boolean),drawPan(int,int,Boolean),
   draw1Chan(int,int,char),drawVol(int,int),drawExp(int,int),drawPitch(int,int),
-  drawInstname(int,char *),drawBank(int,int),
+  drawInstname(int,char *),drawDrumPart(int,int),drawBank(int,int),
   drawReverb(int,int),drawChorus(int,int),drawVoices(void),drawTitle(char *),
   quitCB(),playCB(),pauseCB(),stopCB(),prevCB(),nextCB(),
   optionsCB(),optionspopupCB(),optionscloseCB(),chorusCB(),optionsdestroyCB(),
   flistpopupCB(),flistcloseCB(),
   forwardCB(),backCB(),repeatCB(),randomCB(),menuCB(),sndspecCB(),
-  volsetCB(),volupdownCB(),tunesetCB(),tuneslideCB(),filemenuCB(),
+  volsetCB(),volupdownCB(),tuneslideCB(),filemenuCB(),
   fselectCB(),fdeleteCB(),fdelallCB(),backspaceCB(),aboutCB(),aboutcloseCB(),
 #ifndef WIDGET_IS_LABEL_WIDGET
   deleteTextCB(),
@@ -227,6 +226,7 @@ extern void a_pipe_write(char *);
 extern int a_pipe_read(char *,int);
 extern int a_pipe_nread(char *buf, int n);
 static void initStatus(void);
+static void xaw_vendor_setup(void);
 static void safe_getcwd(char *cwd, int maxlen);
 
 static Widget title_mb,title_sm,time_l,popup_load,popup_load_f,load_d,load_t;
@@ -242,7 +242,7 @@ static Pixel barcol[MAX_XAW_MIDI_CHANNELS];
 static Widget toplevel,m_box,base_f,file_mb,file_sm,bsb,
   quit_b,play_b,pause_b,stop_b,prev_b,next_b,fwd_b,back_b,
   random_b,repeat_b,b_box,v_box,t_box,vol_l0,vol_l,vol_bar,tune_l0,tune_l,tune_bar,
-  trace_vport,trace,pbox,pbsb,popup_opt,popup_optbox,popup_oclose,
+  trace_vport,trace,pbox,popup_opt,popup_optbox,popup_oclose,
   popup_about,popup_abox,popup_aok,about_lbl[5],
   file_vport,file_list,popup_file,popup_fbox,flist_cmdbox,
   popup_fplay,popup_fdelete,popup_fdelall,popup_fclose,
@@ -253,7 +253,12 @@ static Widget *psmenu = NULL;
 static char local_buf[300];
 static char window_title[300], *w_title;
 int amplitude = DEFAULT_AMPLIFICATION;
-String bitmapdir = DEFAULT_PATH "/bitmaps";
+
+#ifndef XAW_BITMAP_DIR
+#define XAW_BITMAP_DIR PKGLIBDIR "/bitmaps"
+#endif /* XAW_BITMAP_DIR */
+
+String bitmapdir = XAW_BITMAP_DIR;
 Boolean arrangetitle,savelist;
 static char **current_flist = NULL;
 static int voices = 0, last_voice = 0, voices_num_width;
@@ -295,6 +300,7 @@ typedef struct {
   int16 reverb[MAX_XAW_MIDI_CHANNELS];  
   char c_flags[MAX_XAW_MIDI_CHANNELS];
   Channel channel[MAX_XAW_MIDI_CHANNELS];
+  int is_drum[MAX_XAW_MIDI_CHANNELS];
 } PanelInfo;
 
 /* Default configuration to execute Xaw interface */
@@ -403,10 +409,10 @@ static struct _app_resources {
 #endif
 } app_resources;
 
-static XtResource resources[] ={
+static XtResource xaw_resources[] ={
 #define offset(entry) XtOffset(struct _app_resources*, entry)
   {"bitmapDir", "BitmapDir", XtRString, sizeof(String),
-   offset(bitmap_dir), XtRString, DEFAULT_PATH "/bitmaps"},
+   offset(bitmap_dir), XtRString, XAW_BITMAP_DIR },
   {"arrangeTitle", "ArrangeTitle", XtRBoolean, sizeof(Boolean),
    offset(arrange_title), XtRImmediate, (XtPointer)False},
   {"saveList", "SaveList", XtRBoolean, sizeof(Boolean),
@@ -574,10 +580,10 @@ static Boolean IsTracePlaying(void) {
 }
 
 static Boolean IsEffectiveFile(char *file) {
-  char *p,*p2;
+  char *p2;
   struct stat st;
 
-  if(p2 = strrchr(file,'#'))
+  if((p2 = strrchr(file,'#')) != NULL)
     *p2 = '\0';
   if(stat(file, &st) != -1)
     if (st.st_mode & S_IFMT & (S_IFDIR|S_IFREG|S_IFLNK)) {
@@ -619,7 +625,6 @@ static void chorusCB(Widget w,XtPointer id_data, XtPointer data) {
 
 /*ARGSUSED*/
 static void optionsCB(Widget w,XtPointer id_data, XtPointer data) {
-  int *id = (int *)id_data;
   Boolean s;
   int i,flags;
   char str[16];
@@ -659,7 +664,6 @@ static void flistpopupCB(Widget w,XtPointer data,XtPointer dummy) {
 }
 
 static void aboutCB(Widget w,XtPointer data,XtPointer dummy) {
-  Dimension x,y,w1,h1;
   char s[12],*p;
   int i;
 
@@ -875,7 +879,7 @@ static void menuCB(Widget w,XtPointer data,XtPointer dummy) {
 
 static void setVolbar(int val) {
   char s[8];
-  float thumb, l_thumb;
+  float thumb;
 
   amplitude = (val > MAXVOLUME)? MAXVOLUME:val;
   sprintf(s, "%d", val);
@@ -915,6 +919,7 @@ static void volupdownAction(Widget w,XEvent *e,String *v,Cardinal *n) {
   setVolbar(i);
 }
 
+#if 0 /* Not used */
 static void tunesetCB(Widget w,XtPointer data,XtPointer call_data)
 {
   static int tmpval;
@@ -932,12 +937,13 @@ static void tunesetCB(Widget w,XtPointer data,XtPointer call_data)
   sprintf(s, "T %d\n", tmpval);
   a_pipe_write(s);
 }
+#endif
 
 static void tunesetAction(Widget w,XEvent *e,String *v,Cardinal *n) {
   static float tmpval;
   char s[16];
   int value;
-  float thumb, l_thumb;
+  float l_thumb;
 
   XtVaGetValues(tune_bar, XtNtopOfThumb, &l_thumb, NULL);
   if (tmpval == l_thumb) return;
@@ -1053,19 +1059,27 @@ static void popdownLoad(Widget w,XtPointer s,XtPointer data) {
   char *p, *p2;
   DirPath full;
   char local_buf[300],tmp[PATH_MAX];
-  struct stat st;
+#ifndef	ORIGINAL
+  int	Aflag = 0; /* RAKK/HIOENS: adding All files in directory */
+#endif	/*RAKK/HIOENS*/
 
   /* tricky way for both use of action and callback */
   if (s != NULL && data == NULL){
     if(*(char *)s == 'A') {
       snprintf(tmp,sizeof(tmp),"%s%c",basepath,'/');
       p = tmp;
+#ifndef	ORIGINAL
+      Aflag = 1;
+#endif	/*RAKK/HIOENS*/
     } else {
       p = XawDialogGetValueString(load_d);
     }
     if (NULL != (p2 = expandDir(p, &full)))
       p = p2;
     if(IsEffectiveFile(p)) {
+#ifndef	ORIGINAL
+      if(Aflag == 1) strcat(p,"/");
+#endif	/*RAKK/HIOENS*/
       snprintf(local_buf,sizeof(local_buf),"X %s\n",p);
       a_pipe_write(local_buf);
     }
@@ -1354,6 +1368,13 @@ static void handle_input(XtPointer data,int *source,XtInputId *id) {
       drawInstname(ch, inst_name[ch]);
     }
     break;
+  case 'i':
+    if(IsTracePlaying()) {
+      ch= *(local_buf+1) - 'A';
+      Panel->is_drum[ch]= *(local_buf+2) - 'A';
+      drawDrumPart(ch, Panel->is_drum[ch]);
+    }
+    break;
   case 'P':
     if(IsTracePlaying()) {
       c= *(local_buf+1);
@@ -1462,7 +1483,7 @@ static void handle_input(XtPointer data,int *source,XtInputId *id) {
     current_flist = (char **)safe_malloc(sizeof(char *) * (n+1));
     if ('\0' != *dotfile) {
       FILE *fp;
-      if (savelist)
+      if (savelist) {
         if (NULL != (fp=fopen(dotfile, "a+"))) {
           for(i=0; i<n; i++) {
             a_pipe_read(local_buf,sizeof(local_buf));
@@ -1472,7 +1493,7 @@ static void handle_input(XtPointer data,int *source,XtInputId *id) {
           }
           fclose(fp);
         }
-      else
+      } else
         for(i=0; i<n; i++) a_pipe_read(local_buf,sizeof(local_buf));
     }
     current_flist[n] = NULL;
@@ -1484,7 +1505,7 @@ static void handle_input(XtPointer data,int *source,XtInputId *id) {
 
 
 static int configcmp(char *s, int *num) {
-  int i,n;
+  int i;
   char *p;
   for (i= 0; i < CFGITEMSNUMBER; i++) {
     if (0 == strncasecmp(s, cfg_items[i], strlen(cfg_items[i]))) {
@@ -1667,6 +1688,15 @@ static int dirlist_cmp (const void *p1, const void *p2)
     return strcmp (s1, s2);
 }
 
+#ifndef	ORIGINAL
+/* RAKK/HIOENS: Save a string on the heap. Addition for 'common.c' ? */
+static  char  * strsav( char  * str ) {
+    char  * tp = safe_malloc( strlen(str)+1 );
+    strcpy(tp, str);
+    return tp;
+}
+#endif	/* RAKK/HIOENS */
+
 static void setDirList(Widget list, Widget label, XawListReturnStruct *lrs) {
   URL dirp;
   struct stat st;
@@ -1677,7 +1707,11 @@ static void setDirList(Widget list, Widget label, XawListReturnStruct *lrs) {
   canonicalize_path(currdir);
   if(stat(currdir, &st) == -1) return;
   if(!S_ISDIR(st.st_mode)) {
+#ifdef	ORIGINAL
       XtVaSetValues(load_d,XtNvalue,currdir,NULL);
+#else	/* RAKK/HIOENS */
+      XtVaSetValues(load_d,XtNvalue,strsav(currdir),NULL);
+#endif	/* ORIGINAL */
       return;
   }
 
@@ -1719,11 +1753,19 @@ static void setDirList(Widget list, Widget label, XawListReturnStruct *lrs) {
     strcpy(local_buf, "Can't read directry");
 
   XtVaSetValues(load_info,XtNlabel,local_buf,NULL);
+#ifdef	ORIGINAL
   XtVaSetValues(label,XtNlabel,currdir,NULL);
+#else	/* RAKK/HIOENS */
+  XtVaSetValues(label,XtNlabel,strsav(currdir),NULL);
+#endif	/* RAKK/HIOENS */
   strcpy(basepath, currdir);
   if(currdir[strlen(currdir) - 1] != '/')
       strcat(currdir, "/");
+#ifdef	ORIGINAL
   XtVaSetValues(load_d,XtNvalue,currdir,NULL);
+#else	/* RAKK/HIOENS */
+  XtVaSetValues(load_d,XtNvalue,strsav(currdir),NULL);
+#endif	/* RAKK/HIOENS */
 }
 
 static void drawBar(int ch,int len, int xofs, int column, Pixel color) {
@@ -1829,11 +1871,19 @@ static void drawInstname(int ch, char *name) {
   XFillRectangle(XtDisplay(trace),XtWindow(trace),gct,
                  pl[plane].ofs[CL_IN]+2,TRACEV_OFS+BAR_SPACE*ch+2,
                  pl[plane].w[CL_IN] -4,BAR_HEIGHT);
-  XSetForeground(disp, gct, ((ISDRUMCHANNEL(ch))? capcolor:black));
+  XSetForeground(disp, gct, ((Panel->is_drum[ch])? capcolor:black));
   len = strlen(name);
   XDrawString(XtDisplay(trace), XtWindow(trace), gct,
               pl[plane].ofs[CL_IN]+4,TRACEV_OFS+BAR_SPACE*ch+15,
               name,(len>disp_inst_name_len)? disp_inst_name_len:len);
+}
+
+static void drawDrumPart(int ch, int is_drum) {
+  if(!ctl->trace_playing) return;
+  if(plane!=0) return;
+
+  if (is_drum) barcol[ch]=app_resources.drumvelocity_color;
+  else         barcol[ch]=app_resources.velocity_color;
 }
 
 static void draw1Note(int ch,int note,int flag) {
@@ -1940,7 +1990,8 @@ static void exchgWidth(Widget w,XEvent *e,String *v,Cardinal *n) {
 
 /*ARGSUSED*/
 static void redrawAction(Widget w,XEvent *e,String *v,Cardinal *n) {
-  redrawTrace(True);
+  if(e->xexpose.count == 0)
+    redrawTrace(True);
 }
 
 /*ARGSUSED*/
@@ -2057,6 +2108,7 @@ static void initStatus(void) {
     Panel->channel[i].chorus_level = 0;
     Panel->v_flags[i] = 0;
     Panel->c_flags[i] = 0;
+    Panel->is_drum[i] = 0;
     *inst_name[i] = '\0';
   }
   last_voice = 0;
@@ -2067,8 +2119,7 @@ static void completeDir(Widget w,XEvent *e, XtPointer data)
 {
   char *p;
   DirPath full;
-  int i,j;
-  
+
   p = XawDialogGetValueString(load_d);
   if (!expandDir(p, &full))
     ctl->cmsg(CMSG_WARNING,VERB_NORMAL,"something wrong with getting path.");
@@ -2105,6 +2156,7 @@ static void completeDir(Widget w,XEvent *e, XtPointer data)
           }
         }
       }
+
       if (match) {
         sprintf(filename, "%s/%s", full.dirname, matchstr);
         XtVaSetValues(load_d,XtNvalue,filename,NULL);
@@ -2123,7 +2175,7 @@ static void a_readconfig (Config *Cfg) {
   char s[SSIZE];
   char *home, c = ' ', *p;
   FILE *fp;
-  int i, k, n = 0;
+  int i, k;
 
   if (NULL == (home=getenv("HOME"))) home=getenv("home");
   if (home != NULL) {
@@ -2184,7 +2236,6 @@ static void a_saveconfig (char *file) {
   FILE *fp;
   Boolean s1, s2;
   int i,flags, cflag;
-  char **pp;
 
   if ('\0' != *file) {
     if (NULL != (fp=fopen(file, "w"))) {
@@ -2594,7 +2645,6 @@ static void fdeleteCB(Widget w,XtPointer data,XtPointer call_data) {
 
 /*ARGSUSED*/
 static void fdelallCB(Widget w,XtPointer data,XtPointer call_data) {
-  XawListReturnStruct *lr = XawListShowCurrent(file_list);
   int i;
 
   stopCB(w,NULL,NULL);
@@ -2629,7 +2679,6 @@ static void fdelallCB(Widget w,XtPointer data,XtPointer call_data) {
 static void backspaceCB(Widget w,XtPointer data,XtPointer call_data) {
   XawTextPosition begin,end,curr;
   XawTextBlock tb;
-
   XawTextGetSelectionPos(w, &begin, &end);
   curr = XawTextGetInsertionPoint(w);
   if(begin == end) return;
@@ -2900,8 +2949,8 @@ void a_start_interface(int pipe_in) {
 #endif
     "*cwd_label.font: -adobe-helvetica-medium-r-*-*-12-*-*-*-*-*-*-*",
     "*time_label*cwd_info.font: -adobe-helvetica-medium-r-*-*-12-*-*-*-*-*-*-*",
-    "*time_label.fontSet: -adobe-helvetica-bold-r-*-*-14-*-*-*-*-*-*-*",
-    "*BitmapDir: " DEFAULT_PATH "/bitmaps/",
+    "*time_label.font: -adobe-helvetica-bold-r-*-*-14-*-*-*-*-*-*-*",
+    "*BitmapDir: " XAW_BITMAP_DIR "/",
 #ifdef XAW3D
     "*volume_bar.translations: #override\\n\
         ~Ctrl Shift<Btn1Down>: do-volupdown(-50)\\n\
@@ -2999,8 +3048,8 @@ void a_start_interface(int pipe_in) {
         <ConfigureNotify>:  do-resize()",
 
     "*load_dialog.value.translations: #override\\n\
-        ~Ctrl<Key>Return:   do-chgdir()\\n\
-        ~Ctrl<Key>KP_Enter: do-chgdir()\\n\
+        ~Ctrl<Key>Return:   do-chgdir() end-of-line()\\n\
+        ~Ctrl<Key>KP_Enter: do-chgdir() end-of-line()\\n\
         ~Ctrl ~Meta<Key>Tab:    do-complete() end-of-line()\\n\
         Ctrl ~Shift<Key>g:  do-dialog-button(1)\\n\
         <Key>BackSpace:     do-backspace() delete-previous-character()\\n\
@@ -3053,7 +3102,7 @@ void a_start_interface(int pipe_in) {
   int i, j, k, tmpi;
   int argc=1;
   float thumb, l_thumb, l_thumbj;
-  char *argv="timidity", *moretext, *filetext;
+  char *argv=APP_NAME, *filetext;
 #ifdef I18N
   #define XtNfontDEF XtNfontSet
   XFontSet textfont;
@@ -3081,13 +3130,16 @@ void a_start_interface(int pipe_in) {
   }
   exit(0);
 #endif
+
+  xaw_vendor_setup();
+
 #ifdef I18N
   XtSetLanguageProc(NULL,NULL,NULL);
 #endif
   toplevel=XtVaAppInitialize(&app_con,APP_CLASS,NULL,ZERO,&argc,&argv,
                          fallback_resources,NULL);
-  XtGetApplicationResources(toplevel,(caddr_t)&app_resources,resources,
-                          XtNumber(resources),NULL,0);
+  XtGetApplicationResources(toplevel,(caddr_t)&app_resources,xaw_resources,
+                          XtNumber(xaw_resources),NULL,0);
   bitmapdir = app_resources.bitmap_dir;
   arrangetitle = app_resources.arrange_title;
   savelist = app_resources.save_list;
@@ -3375,10 +3427,13 @@ void a_start_interface(int pipe_in) {
     gct = XCreateGC(disp, RootWindow(disp, screen), 0, NULL);
     gc = XCreateGC(disp, RootWindow(disp, screen), 0, NULL);
     for(i=0; i<MAX_XAW_MIDI_CHANNELS; i++) {
-      if(ISDRUMCHANNEL(i))
+      if(ISDRUMCHANNEL(i)) {
+        Panel->is_drum[i]=1;
         barcol[i]=app_resources.drumvelocity_color;
-      else
+      }
+      else {
         barcol[i]=app_resources.velocity_color;
+      }
       inst_name[i] = (char *)safe_malloc(sizeof(char) * INST_NAME_SIZE);
     }
     rimcolor = app_resources.rim_color;
@@ -3527,12 +3582,12 @@ void a_start_interface(int pipe_in) {
 
   if(Cfg.repeat) repeatCB(NULL,&Cfg.repeat,NULL);
   if(Cfg.shuffle) randomCB(NULL,&Cfg.shuffle,NULL);
-  if(Cfg.autostart)
+  if(Cfg.autostart) {
     if(max_files==0)
       prevCB(NULL,NULL,NULL);
     else
       playCB(NULL,NULL,NULL);
-  else
+  } else
     stopCB(NULL,NULL,NULL);
   if(ctl->trace_playing) initStatus();
   XtAppMainLoop(app_con);
@@ -3540,10 +3595,36 @@ void a_start_interface(int pipe_in) {
 
 static void safe_getcwd(char *cwd, int maxlen)
 {
+#ifndef STDC_HEADERS
+  if(!getwd(cwd))
+#else
   if(!getcwd(cwd, maxlen))
+#endif
   {
     ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
 	      "Warning: Can't get current working directory");
     strcpy(cwd, ".");
   }
 }
+
+#include "interface.h"
+#if defined(IA_MOTIF)
+/*
+ * Switch -lXm's vendorShellWidgetClass to -lXaw's vendorShellWidgetClass
+ */
+#define vendorShellClassRec xaw_vendorShellClassRec
+#define vendorShellWidgetClass xaw_vendorShellWidgetClass
+#include "xaw_redef.c"
+#undef vendorShellClassRec
+#undef vendorShellWidgetClass
+extern WidgetClass vendorShellWidgetClass;
+extern VendorShellClassRec vendorShellClassRec;
+static void xaw_vendor_setup(void)
+{
+    memcpy(&vendorShellClassRec, &xaw_vendorShellClassRec,
+	   sizeof(VendorShellClassRec));
+    vendorShellWidgetClass = (WidgetClass)&xaw_vendorShellWidgetClass;
+}
+#else
+static void xaw_vendor_setup(void) { }
+#endif

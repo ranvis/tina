@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -25,6 +25,9 @@
 */
 
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,11 +49,8 @@
 extern int default_play_event(void *);
 static int open_output(void); /* 0=success, 1=warning, -1=fatal error */
 static void close_output(void);
-static void output_data(int32 *buf, int32 count);
-static int  flush_output(void);
-static void purge_output(void);
-static int32 current_samples(void);
-static int play_loop(void);
+static int output_data(char *buf, int32 nbytes);
+static int acntl(int request, void *arg);
 
 
 /* export the playback mode */
@@ -58,19 +58,15 @@ static int play_loop(void);
 #define dpm mac_play_mode
 
 PlayMode dpm = {
-  44100, PE_16BIT|PE_SIGNED, PF_NEED_INSTRUMENTS|PF_CAN_TRACE,
-  NULL,			//file descriptor
-  {0,0,0,0,0},	/*no extra parameters so far*/
-  "mac audio driver", 'm',
-  "",			//device file name
-  default_play_event,
-  open_output,
-  close_output,
-  output_data,
-  flush_output,
-  purge_output,
-  current_samples,
-  play_loop
+	44100, PE_16BIT|PE_SIGNED, PF_PCM_STREAM|PF_CAN_TRACE,
+	-1,			//file descriptor
+	{0}, /* default: get all the buffer fragments you can */
+	"mac audio driver", 'm',
+	"",			//device file name
+	open_output,
+	close_output,
+	output_data,
+	acntl
 };
 
 #define	MACBUFSIZE	((AUDIO_BUFFER_SIZE)*4+100)
@@ -86,7 +82,8 @@ SndChannelPtr	gSndCannel=0;
 short			mac_amplitude=0x00FF;
 unsigned long	start_tic;
 volatile static int32	play_counter;
-static int				filling_flag, flushing_flag;
+volatile int	mac_buf_using_num, mac_flushing_flag;
+static int	filling_flag;
 /* ******************************************************************* */
 static SndChannelPtr MyCreateSndChannel(short synth, long initOptions,
 					SndCallBackUPP userRoutine,	short	queueLength)
@@ -115,36 +112,44 @@ static void initCounter()
 {
 	start_tic=TickCount();
 	play_counter=0;
+	mac_buf_using_num=0;
 	filling_flag=0;
 	play_mode->extra_param[0]=0;
-	flushing_flag=0;
+	mac_flushing_flag=0;
 }
 
 static pascal void callback( SndChannelPtr /*chan*/, SndCommand * cmd)
 {
 	if( cmd->param2==FLUSH_END ){
-		flushing_flag=0;
+		mac_flushing_flag=0;
 	}else{
 		play_counter+= cmd->param2;
 	}
+	mac_buf_using_num--;
 }
 
 static int open_output (void)
 {
 	int		i;
 	SndCommand	theCmd;
-
+	int include_enc, exclude_enc;
+	
 	gSndCannel=MyCreateSndChannel(sampledSynth, 0,
 					NewSndCallBackProc(callback), MAC_SOUNDBUF_QLENGTH);
 	if( gSndCannel==0 )
 			{ StopAlertMessage("\pCan't open Sound Channel"); ExitToShell(); }
 					
-	dpm.encoding |= PE_16BIT;
-    dpm.encoding |= PE_SIGNED;
-    dpm.encoding &= ~PE_ULAW;
-	dpm.encoding &= ~PE_ALAW;
-    dpm.encoding &= ~PE_BYTESWAP;
-
+	dpm.encoding = include_enc = exclude_enc = 0;
+	
+	include_enc |= PE_16BIT;
+	include_enc |= PE_SIGNED;
+	
+	exclude_enc |= PE_ULAW;
+	exclude_enc |= PE_ALAW;
+	exclude_enc |= PE_BYTESWAP;
+	dpm.encoding = include_enc;
+	dpm.encoding = validate_encoding(dpm.encoding, include_enc, exclude_enc);
+    
 	for( i=0; i<MACBUFNUM; i++) /*making sound buffer*/
 	{
 		soundHandle[i]=NewHandle(MACBUFSIZE);
@@ -156,6 +161,11 @@ static int open_output (void)
 	theCmd.param1=mac_amplitude;
 	SndDoCommand(gSndCannel, &theCmd, 0);
 	initCounter();
+#ifdef MAC_INITIAL_FILLING
+	do_initial_filling=1;
+#else
+	do_initial_filling=0;
+#endif
 	return 0;
 }
 
@@ -185,54 +195,62 @@ static void QuingSndCommand(SndChannelPtr chan, const SndCommand *cmd)
 		{
 			gBusy=false;
 				//end of INITIAL FILLING
+#ifdef MAC_INITIAL_FILLING
 			filling_end();
+#endif
 			trace_loop();
 			YieldToAnyThread();
 		}
-		else	/*queueFull °Ê³°¤Îerr¤Ê¤é½ªÎ»*/
+		else	/*queueFull ˆÈŠO‚Ìerr‚È‚çI—¹*/
 			mac_ErrorExit("\pSound out error--quit");			
 	}
 }
 
-static void output_data (int32 *buf, int32 count)
+static int output_data (char *buf, int32 nbytes)
 {
 	short			err,headerLen;
-	long			len = count;
-	const int32 	samples = count;
+	//long			len = count;
+	int32			samples;
 	long			offset;
 	SndCommand		theCmd;
 	
-			// start INITIAL FILLING
+	if( gCursorIsWatch ){
+		InitCursor();	gCursorIsWatch=false;
+	}
+
+#ifdef MAC_INITIAL_FILLING	// start INITIAL FILLING
 	if( play_counter==0 && filling_flag==0 && do_initial_filling){
 		filling_flag=1;
 		theCmd.cmd=pauseCmd; SndDoImmediate(gSndCannel, &theCmd);
 	}
-
+#endif
+	
+	samples = nbytes;
 	if (!(dpm.encoding & PE_MONO)) /* Stereo sample */
 	{
-		count *= 2;
-		len *= 2;
+		samples /= 2;
+		//len *= 2;
 	}
 
 	if (dpm.encoding & PE_16BIT)
-		len *= 2;
+		samples /= 2;
 	else{
 		ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
 		  "Sorry, not support 8bit sound.");
 		ExitToShell();
 	}
 	
-	s32tos16 (buf, count);	/*power mac always 16bit*/
+	//s32tos16 (buf, count);	/*power mac always 16bit*/
 	
-	if( count>MACBUFSIZE)
+	if( nbytes>MACBUFSIZE)
 		mac_ErrorExit("\pTiMidity Error--sound packet is too large");	
 	err= SetupSndHeader((SndListHandle)soundHandle[nextBuf],
 			dpm.encoding & PE_MONO? 1:2,
-					dpm.rate<<16, 16, 'NONE',
-							60, len, &headerLen);
+				dpm.rate<<16, 16, 'NONE',
+					60, nbytes, &headerLen);
 	if( err )
 		mac_ErrorExit("\pTiMidity Error--Cannot make Sound");
-	BlockMoveData(buf, *(soundHandle[nextBuf])+headerLen, len);
+	BlockMoveData(buf, *(soundHandle[nextBuf])+headerLen, nbytes);
 	
 	err= GetSoundHeaderOffset((SndListHandle)(soundHandle[nextBuf]), &offset);
 	if( err )
@@ -241,54 +259,14 @@ static void output_data (int32 *buf, int32 count)
 	theCmd.param2=(long)( *(soundHandle[nextBuf])+offset);
 	
 	QuingSndCommand(gSndCannel, &theCmd);
-	nextBuf++;	if( nextBuf>=MACBUFNUM ) nextBuf=0;
+	nextBuf++; mac_buf_using_num++;	if( nextBuf>=MACBUFNUM ) nextBuf=0;
 
 	theCmd.cmd= callBackCmd;	// post set
 	theCmd.param1= 0;
 	theCmd.param2= samples;
 	QuingSndCommand(gSndCannel, &theCmd);
 	play_mode->extra_param[0] += samples;
-}
-
-static void close_output (void)
-{
-	int i;
-	
-	purge_output();
-	
-	for( i=0; i<MACBUFNUM; i++)
-		DisposeHandle(soundHandle[i]);
-	
-	SndDisposeChannel(gSndCannel, 0); gSndCannel=0;
-	initCounter();
-}
-
-static int flush_output (void)
-{
-	int			ret=RC_NONE;
-	SndCommand	theCmd;
-
-	flushing_flag=1;
-	theCmd.cmd= callBackCmd;
-	theCmd.param1= 0;
-	theCmd.param2= FLUSH_END;
-	QuingSndCommand(gSndCannel, &theCmd);
-	
-	filling_end();
-	for(;;){
-		trace_loop();
-		YieldToAnyThread();
-		//ctl->current_time(current_samples());
-   		if( ! flushing_flag ){ //end of midi
-   			ret= RC_NONE;
-   			break;
-   		}else if( mac_rc!=RC_NONE ){
-  			ret= mac_rc;
-  			break;
-   		}
-   	}
-   	initCounter();
-   	return ret;
+	return 0; /*good*/
 }
 
 static void fade_output()
@@ -310,8 +288,9 @@ static void purge_output (void)
 {
 	OSErr		err;
 	SndCommand	theCmd;
-	
+#if FADE_AT_PURGE
 	if( skin_state==PLAYING ) fade_output();
+#endif
 	theCmd.cmd=flushCmd;	/*clear buffer*/
 	err= SndDoImmediate(gSndCannel, &theCmd);
 	theCmd.cmd=quietCmd;
@@ -336,15 +315,76 @@ static void purge_output (void)
 	initCounter();
 }
 
-static int play_loop(void)
+static void close_output (void)
 {
-	return 0;
+	int i;
+	
+	purge_output();
+	
+	for( i=0; i<MACBUFNUM; i++)
+		DisposeHandle(soundHandle[i]);
+	
+	SndDisposeChannel(gSndCannel, 0); gSndCannel=0;
+	initCounter();
+}
+
+static int flush_output (void)
+{
+	int		ret=RC_NONE;
+	SndCommand	theCmd;
+
+	mac_flushing_flag=1;
+	theCmd.cmd= callBackCmd;
+	theCmd.param1= 0;
+	theCmd.param2= FLUSH_END;
+	QuingSndCommand(gSndCannel, &theCmd);
+	
+	filling_end();
+	for(;;){
+		trace_loop();
+		YieldToAnyThread();
+		//ctl->current_time(current_samples());
+   		if( ! mac_flushing_flag ){ //end of midi
+   			ret= RC_NONE;
+   			break;
+   		}else if( mac_rc!=RC_NONE ){
+  			ret= mac_rc;
+  			break;
+   		}
+   	}
+   	initCounter();
+   	return ret;
 }
 
 static int32 current_samples(void)
 {
 	return play_counter;
 }
+
+static int acntl(int request, void * arg)
+{
+    switch(request)
+    {
+      case PM_REQ_DISCARD:
+	purge_output();
+	return 0;
+      case PM_REQ_FLUSH:
+      case PM_REQ_OUTPUT_FINISH:
+      	flush_output();
+	return 0;
+      case PM_REQ_GETQSIZ:
+        *(int32*)arg= MACBUFNUM*AUDIO_BUFFER_SIZE*10;
+      	return 0;
+      case PM_REQ_GETSAMPLES:
+      	*(int*)arg= current_samples();
+      	return 0;
+      case PM_REQ_PLAY_START:
+	initCounter();
+      	return 0;
+    }
+    return -1;
+}
+
 /* ************************************************************* */
 
 

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
    controls.c
 
@@ -29,9 +28,17 @@
 #include "timidity.h"
 #include "controls.h"
 
-#ifndef __MACOS__
-# define DEFAULT_CONTROL_MODE &dumb_control_mode
-#endif /* __MACOS__ */
+#if defined(__MACOS__)
+extern ControlMode mac_control_mode;
+#define DEFAULT_CONTROL_MODE &mac_control_mode
+#elif defined(IA_W32GUI)
+extern ControlMode w32gui_control_mode;
+#define DEFAULT_CONTROL_MODE &w32gui_control_mode
+#else
+extern ControlMode dumb_control_mode;
+#define DEFAULT_CONTROL_MODE &dumb_control_mode
+#endif
+
 
 #ifdef IA_PLUGIN
   extern ControlMode plugin_control_mode;
@@ -124,12 +131,13 @@
 # endif
 #endif
 
-#ifdef __MACOS__
-  extern ControlMode mac_control_mode;
-  #ifndef DEFAULT_CONTROL_MODE
-    #define DEFAULT_CONTROL_MODE &mac_control_mode
-  #endif
-#endif
+#ifdef IA_SERVER
+extern ControlMode server_control_mode;
+#endif /* IA_SERVER */
+
+#ifdef IA_ALSASEQ
+extern ControlMode alsaseq_control_mode;
+#endif /* IA_ALSASEQ */
 
 /* Minimal control mode */
 extern ControlMode dumb_control_mode;
@@ -174,6 +182,9 @@ ControlMode *ctl_list[]={
 #ifdef __MACOS__
   &mac_control_mode,
 #endif
+#ifdef IA_W32GUI
+  &w32gui_control_mode,
+#endif /* IA_W32GUI */
 #ifndef __MACOS__
   &dumb_control_mode,
 #endif
@@ -182,6 +193,12 @@ ControlMode *ctl_list[]={
 #endif
 #ifdef IA_PLUGIN
   &plugin_control_mode,
+#endif
+#ifdef IA_SERVER
+  &server_control_mode,
+#endif /* IA_SERVER */
+#ifdef IA_ALSASEQ
+  &alsaseq_control_mode,
 #endif
   0
 };

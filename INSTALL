@@ -3,18 +3,17 @@
                               Installation guide
 
 					Masanao Izumo <mo@goice.co.jp>
-					Last updated on Feb.4.1999
+					Last updated on Apr.4.2000
 ==============================================================================
 
-  This document describes how to install TiMidity++(version 1.3.0 or
+  This document describes how to install TiMidity++(version 2.9.2 or
 later) for your UNIX-like machine.  Methods for Macintosh are not
 described in this document.
 
-  This version or later, It is enabled to configure and make
-timidity.exe on CYGNUS + egcs-compiler(gcc) environment of
-Windows98/95/NT.  If you are in Windows, install cygnus and egcs (or
-mingw) if you don't have them (which is available from
-http://www.cygnus.com), and run `cygnus' on MS-DOS console, and make
+  It is enabled to configure and make timidity.exe on the Cygwin
+environment of Windows98/95/NT.  If you are in Windows, install cygnus
+and egcs (or mingw) if you don't have them (which is available from
+http://sourceware.cygnus.com/cygwin/), and run `cygnus', and make
 symbolik link /bin/sh to bash.
 
 Installing process:
@@ -32,7 +31,7 @@ Installing process:
 ------------
   First, execute the following command:
 
-% sh configure --help
+% /bin/sh configure --help
 
   Many options of configure will be displayed. Main of these are the
 following:
@@ -43,29 +42,31 @@ following:
   --prefix=PREFIX
 	Specifies the base of installing directory. By default,
 	PREFIX is "/usr/local/".
-	Any files are installed in : 
-	  PREFIX/bin : executable file
-	  PREFIX/lib : configuration files and patches
-	  PREFIX/man : online manual
-	
+	Any files are installed in:
+	  PREFIX/bin: executable files
+	  PREFIX/share/timidity: configuration files and patches
+	  PREFIX/lib/timidity: libraries and dynamic link interfaces.
+	  PREFIX/man: online manuals
+
 	Example:
 	% sh configure --prefix=/opt/gnu
-	# installs to /opt/gnu/bin, /opt/gnu/lib, /opt/gnu/man
+	# installs to /opt/gnu/bin, /opt/gnu/man, /opt/gnu/...
 
   --x-includes=DIR
 	Specifies include directory of X library.
 
-  --x-libraries=DIR       X library files are in DIR
+  --x-libraries=DIR
 	Specifies library directory of X library.
 
   --enable-debug
 	Compiles TiMidity++ with debugging methods/informations.
 
-  --disable-dynamic
-	Disables the feature of dynamic loading interface.
-
   --with-x
 	You should specify this option if you have X Window environment.
+	--with-x is `yes' by default.
+
+  --without-x
+	You must specify this option if you don't have X Window environment.
 
   --with-tcl-includes=dir
 	Specifies include directory of Tcl.
@@ -83,11 +84,45 @@ following:
 	Specifies library directory of Tk.
 	(If you fail to detect it automatically, try to specify this.)
 
-  --enable-audio
+  --enable-audio[=mode_list]
 	Enables TiMidity++ to play MIDI files.
-	If this option is omitted, TiMidity++ is only the MIDI-to-WAVE
-	converter. This option should not be specified if target machine
-	does not support audio device.
+	If --enable-audio=no, TiMidity++ is only the MIDI-to-WAVE
+	converter.  You can specify multi-audio device from follows
+	(specify comma separated list):
+	    default:  Automatically select audio device.	(default)
+	    oss:  OSS /dev/dsp
+	    sun:  SunOS /dev/audio
+	    hpux: HPUX /dev/audio
+	    irix: IRIX audio library
+	    mme:  OSF/1 MME
+	    sb_dsp: BSD/OS 2.0 /dev/sb_dsp
+	    w32:  Windows MMS
+	    alsa: ALSA pcm device
+	    alib: HPUX network audio (Alib)
+	    nas:  NAS - Network Audio System
+	    esd:  EsounD
+
+  --enable-nas
+	Enables TiMidity++ to play MIDI files using NAS (Network Audio System).
+
+  --enable-esd
+	Enables TiMidity++ to play MIDI files using EsounD.
+
+  --enable-interface=[Comma separated interface list]
+	Specifies interface list (Comma separated).  Choose interfaces
+	from follows.
+	    ncurses,slang,motif,tcltk,emacs,vt100,xaw,xskin,gtk,w32gui,server
+	Note that
+	    --enable-interface=INTERFACE1,INTERFACE2,...
+	equals as
+	    --enable-INTERFACE1=yes --enable-INTERFACE2=yes ...
+
+  --enable-dynamic[=Comma separated interface list]
+	Specifies dynamic link interface list.
+	Note that
+	    --enable-dynamic=INTERFACE1,INTERFACE2,...
+	equals as
+	    --enable-INTERFACE1=dynamic --enable-INTERFACE2=dynamic ...
 
   --enable-ncurses
 	Includes Ncurses interface.  If you build this interface as dinamic
@@ -134,6 +169,12 @@ following:
 	Includes Gtk+ interface.  If you build this interface as dinamic link
 	interface, please specify --enable-gtk=dynamic.
 
+  --enable-w32gui
+	Build TiMidity++ as Windows GUI.
+
+  --enable-alsaseq
+	Build TiMidity++ as ALSA sequencer client.
+
   --enable-network
 	This option allows TiMidity++ to play MIDI file getting via 
 	network. You can specify the location of MIDI files by
@@ -148,10 +189,9 @@ following:
 	contents format.
 
 
-  For example, including all functions:
+  For example:
 
-% sh configure --with-x --enable-audio \
-               --enable-ncurses --enable-slang  --enable-motif \
+% sh configure --enable-ncurses --enable-slang  --enable-motif \
                --enable-tcltk --enable-emacs --enable-vt100 --enable-xaw \
                --enable-xskin --enable-gtk \
                --enable-network --enable-spectrogram --enable-wrd
@@ -164,10 +204,10 @@ smoothly. Optimizing options can specify in configuration:
  (for example : super-sparc/gcc)
 
  (csh, tcsh)
-% env CFLAGS='-O3 -Wall -mv8 -funroll-all-loops -fomit-frame-pointer -msupersparc -DAUDIO_FILLING_MILSEC=5000' sh configure [configure-options]...
+% env CFLAGS='-O3 -Wall -mv8 -funroll-all-loops -fomit-frame-pointer -msupersparc /bin/sh configure [configure-options]...
 
 (sh, bash)
-% CFLAGS='-O3 -Wall -mv8 -funroll-all-loops -fomit-frame-pointer -msupersparc -DAUDIO_FILLING_MILSEC=5000' sh configure [configure-options]...
+% CFLAGS='-O3 -Wall -mv8 -funroll-all-loops -fomit-frame-pointer -msupersparc /bin/sh configure [configure-options]...
 
 
 
@@ -175,8 +215,7 @@ smoothly. Optimizing options can specify in configuration:
 ------------------------------
   If configure failed or compile not complete successfully, edit
 common.makefile, Makefile, and timidity.h to appropriate value.
-
-
+All of definition of variables are orverwrited by common.makefile.
 
 3. make
 -------
@@ -191,7 +230,7 @@ Note: Some system announces warnings
 vendorShellClassRec
 vendorShellWidgetClass
 
-in linking XAW. But it makes no matter. Don't worry.
+in linking XAW. But it makes no matter.  Don't worry.
 
 
 4. install
@@ -209,22 +248,18 @@ can select follows:
 
 % make -n ...
 
-  On Windows, `make install' is not worked in current version
-(v1.3.0).  So please copy timidity/timidity.exe to any where by hand.
-
 
 5. Search for various voice data
 
   TiMidity++ uses GUS/patch (Glavis Ultrasound) as the voice data to
 play.  You must get GUS/patch files, and make the configuration file.
 You must make the configuration file (*.cfg).  By default,
-timidity.cfg is /usr/local/lib/timidity/timidity.cfg (or
+timidity.cfg is /usr/local/share/timidity/timidity.cfg (or
 C:\WINDOWS\TIMIDITY.CFG on Windows).  And please check the following
 sites for many voice(patch) data:
 
-
-http://www.goice.co.jp/timidity/gus/			(33M patch)
-http://www.goice.co.jp/timidity/dist/cfg/		(Some samples of *.cfg)
+http://www.goice.co.jp/member/mo/timidity/link.html#gus
+http://www.goice.co.jp/member/mo/timidity/dist/cfg/	(Some samples of *.cfg)
 http://www.i.h.kyoto-u.ac.jp/~shom/timidity/		(10M or 4M patch)
 ftp://ftp.cdrom.com/pub/gus/sound/patches/files/	(GUS site)
 
@@ -302,23 +337,6 @@ example, if you wish to default drum channel be 10 and 16,
 This channel can change in command line option.
 
 
-  Next, configuration of presence hack option. This option is enabled
-if PRESENCE_HACK is defined. By default:
-
-#define PRESENCE_HACK -1
-
--1 is means that only enables if -b command line option is specified.
-If defined with 0 to 2, the effect is following:
-
-#define PRESENCE_HACK 0 /* mainly heard from right */
-#define PRESENCE_HACK 1 /* mainly heard from left */
-#define PRESENCE_HACK 2 /* changes voices right and left each 10 second */
-
-And the following define PRESENCE_DECAY is the delay number for making
-presence effects. This number can specify in command line option by
-following -b? option in millisecond.
-
-
   Next, type of floating point number. Choose one of these:
 
 typedef double FLOAT_T;
@@ -371,11 +389,7 @@ enables good harmony.
 
   Next, size of internal buffer. By default:
 
-#ifdef __WIN32__
-#define AUDIO_BUFFER_BITS 12
-#else
 #define AUDIO_BUFFER_BITS 11
-#endif
 
 I guess this values no need to change.
 
@@ -548,8 +562,8 @@ handle Japanese, specify "ASCII" or "NOCNV" alternatively.
 #define MODULATION_WHEEL_ALLOW
 #define PORTAMENTO_ALLOW
 #define NRPN_VIBRATO_ALLOW
-/* #define REVERB_CONTROL_ALLOW */
-/* #define CHORUS_CONTROL_ALLOW */
+#define REVERB_CONTROL_ALLOW
+#define CHORUS_CONTROL_ALLOW
 /* #define GM_CHANNEL_PRESSURE_ALLOW */
 /* #define XG_BANK_SELECT_LSB_ALLOW */
 /* #define ALWAYS_TRACE_TEXT_META_EVENT */

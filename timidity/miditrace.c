@@ -1,25 +1,25 @@
 /*
-   TiMidity++ -- MIDI to WAVE converter and player
-   Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
-   Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 
-   miditrace.c - Midi audio synchronized tracer
-   Written by Masanao Izumo <mo@goice.co.jp>
+    miditrace.c - Midi audio synchronized tracer
+    Written by Masanao Izumo <mo@goice.co.jp>
 */
 
 
@@ -27,9 +27,9 @@
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
 #include <stdio.h>
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif
+#endif /* HAVE_UNISTD_H */
 #include <stdlib.h>
 
 #ifndef NO_STRING_H
@@ -46,7 +46,7 @@
 #include "controls.h"
 #include "miditrace.h"
 #include "wrd.h"
-
+#include "aq.h"
 
 enum trace_argtypes
 {
@@ -107,18 +107,9 @@ static void reuse_trace_node(MidiTraceList *p)
 
 static int32 trace_start_time(void)
 {
-    static int support_midi_time_trace = -1;
-
-    if(support_midi_time_trace == -1)
-    {
-	if(play_mode->current_samples() != -1)
-	    support_midi_time_trace = 1;
-	else
-	    support_midi_time_trace = 0;
-    }
-    if(!support_midi_time_trace)
-	return -1;
-    return current_sample;
+    if(play_mode->flag & PF_CAN_TRACE)
+	return current_sample;
+    return -1;
 }
 
 static void run_midi_trace(MidiTraceList *p)
@@ -150,7 +141,7 @@ static MidiTraceList *midi_trace_setfunc(MidiTraceList *node)
 {
     MidiTraceList *p;
 
-    if(midi_trace.nodelay || node->start < 0)
+    if(!ctl->trace_playing || node->start < 0)
     {
 	run_midi_trace(node);
 	return NULL;
@@ -248,8 +239,8 @@ int32 trace_loop(void)
     if(midi_trace.head == NULL)
 	return 0;
 
-    if((cur = current_trace_samples()) == -1)
-	cur = 0x7fffffff;
+    if((cur = current_trace_samples()) == -1 || !ctl->trace_playing)
+	cur = 0x7fffffff; /* apply all trace event */
 
     ctl_update = 0;
     start = midi_trace.head->start;
@@ -279,19 +270,15 @@ int32 trace_loop(void)
     {
 	if(lasttime == cur)
 	    midi_trace.head->start--;	/* avoid infinite loop */
+	lasttime = cur;
     }
-    lasttime = cur;
+
     return 1; /* must call trace_loop() continued */
 }
 
 void trace_offset(int offset)
 {
     midi_trace.offset = offset;
-}
-
-void trace_nodelay(int nodelay)
-{
-    midi_trace.nodelay = nodelay;
 }
 
 void trace_flush(void)
@@ -321,16 +308,28 @@ void set_trace_loop_hook(void (* f)(void))
 
 int32 current_trace_samples(void)
 {
-    int32 s;
-
-    s = play_mode->current_samples();
-    if(s <= -1)
+    int32 sp;
+    if((sp = aq_samples()) == -1)
 	return -1;
-    return midi_trace.offset + s;
+    return midi_trace.offset + aq_samples();
 }
 
 void init_midi_trace(void)
 {
     memset(&midi_trace, 0, sizeof(midi_trace));
     init_mblock(&midi_trace.pool);
+}
+
+int32 trace_wait_samples(void)
+{
+    int32 s;
+
+    if(midi_trace.head == NULL)
+	return -1;
+    if((s = current_trace_samples()) == -1)
+	return 0;
+    s = midi_trace.head->start - s;
+    if(s < 0)
+	s = 0;
+    return s;
 }

@@ -1,7 +1,6 @@
 /* 
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     motif_ctl.c: written by Vincent Pagel (pagel@loria.fr) 10/4/95
    
@@ -42,7 +41,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdarg.h>
-
+#ifndef NO_STRING_H
+#include <string.h>
+#else
+#include <strings.h>
+#endif
 #include "timidity.h"
 #include "common.h"
 #include "instrum.h"
@@ -50,6 +53,7 @@
 #include "output.h"
 #include "controls.h"
 #include "gtk_h.h"
+#include "readmidi.h"
 
 static int ctl_open(int using_stdin, int using_stdout);
 static void ctl_close(void);
@@ -71,6 +75,7 @@ static void ctl_panning(int channel, int val);
 static void ctl_sustain(int channel, int val);
 static void ctl_pitch_bend(int channel, int val);
 static void ctl_reset(void);
+static void ctl_lyric(int);
 
 
 /**********************************************/
@@ -81,6 +86,7 @@ ControlMode ctl =
 {
     "gtk+ interface", 'g',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     ctl_pass_playing_list,
@@ -108,7 +114,7 @@ cmsg(int type, int verbosity_level, char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	fprintf(stderr, "\n");
     }
-    else if (ctl.trace_playing) {
+    else {
 	vsnprintf(local, sizeof(local), fmt, ap);
 	gtk_pipe_int_write(CMSG_MESSAGE);
 	gtk_pipe_int_write(type);
@@ -175,6 +181,7 @@ static void ctl_event(CtlEvent *e)
       case CTLE_REVERB_EFFECT:
 	break;
       case CTLE_LYRIC:
+	ctl_lyric((int)e->v1);
 	break;
       case CTLE_REFRESH:
 	ctl_refresh();
@@ -188,16 +195,9 @@ static void ctl_event(CtlEvent *e)
 }
 
 static void
-_ctl_refresh(void)
-{
-    /* gtk_pipe_int_write(REFRESH_MESSAGE); */
-}
-
-static void
 ctl_refresh(void)
 {
-    if (ctl.trace_playing)
-	_ctl_refresh();
+    /* gtk_pipe_int_write(REFRESH_MESSAGE); */
 }
 
 static void
@@ -227,8 +227,6 @@ ctl_file_name(char *name)
 static void
 ctl_current_time(int secs, int voices)
 {
-    if (!ctl.trace_playing) 
-	return;
     gtk_pipe_int_write(CURTIME_MESSAGE);
     gtk_pipe_int_write(secs);
     gtk_pipe_int_write(voices);
@@ -357,8 +355,54 @@ ctl_reset(void)
 	ctl_sustain(i, channel[i].sustain);
 	ctl_pitch_bend(i, channel[i].pitchbend);
     }
-  _ctl_refresh();
+  ctl_refresh();
   */
+}
+
+static void
+ctl_lyric(int lyricid)
+{
+    char	*lyric;
+    static char	lyric_buf[300];
+
+    lyric = event2string(lyricid);
+    if(lyric != NULL)
+    {
+	if(lyric[0] == ME_KARAOKE_LYRIC)
+	{
+	    if(!lyric[1])
+		return;
+	    if(lyric[1] == '/' || lyric[1] == '\\')
+	    {
+		snprintf(lyric_buf, sizeof(lyric_buf), "\n%s", lyric + 2);
+		gtk_pipe_int_write(LYRIC_MESSAGE);
+		gtk_pipe_string_write(lyric_buf);
+	    }
+	    else if(lyric[1] == '@')
+	    {
+		if(lyric[2] == 'L')
+		    snprintf(lyric_buf, sizeof(lyric_buf), "Language: %s\n", lyric + 3);
+		else if(lyric[2] == 'T')
+		    snprintf(lyric_buf, sizeof(lyric_buf), "Title: %s\n", lyric + 3);
+		else
+		    snprintf(lyric_buf, sizeof(lyric_buf), "%s\n", lyric + 1);
+		gtk_pipe_int_write(LYRIC_MESSAGE);
+		gtk_pipe_string_write(lyric_buf);
+	    }
+	    else
+	    {
+		strncpy(lyric_buf, lyric + 1, sizeof(lyric_buf) - 1);
+		gtk_pipe_int_write(LYRIC_MESSAGE);
+		gtk_pipe_string_write(lyric_buf);
+	    }
+	}
+	else
+	{
+	    strncpy(lyric_buf, lyric + 1, sizeof(lyric_buf) - 1);
+	    gtk_pipe_int_write(LYRIC_MESSAGE);
+	    gtk_pipe_string_write(lyric_buf);
+	}
+    }
 }
 
 /***********************************************************************/
@@ -368,7 +412,6 @@ static int
 ctl_open(int using_stdin, int using_stdout)
 {
     ctl.opened=1;
-    ctl.trace_playing=1;	/* Default mode with Gtk+ interface */
   
     /* The child process won't come back from this call  */
     gtk_pipe_open();
@@ -506,7 +549,7 @@ ctl_pass_playing_list(int number_of_files, char *list_of_files[])
 	/* Ask the interface for a filename to play -> begin to play automatically */
 	gtk_pipe_int_write(NEXT_FILE_MESSAGE);
     }
-    
+
     command = ctl_blocking_read(&val);
 
     /* Main Loop */

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
@@ -44,15 +42,18 @@
 #include "dlutils.h"
 
 static int ctl_open(int using_stdin, int using_stdout);
+static void ctl_close(void);
 extern char *dynamic_interface_module(int id);
 static void ctl_event(){} /* Do nothing */
 static int cmsg(int type, int verbosity_level, char *fmt, ...);
+static void *libhandle;
+static void (* ctl_close_hook)(void);
 
 ControlMode dynamic_control_mode =
 {
     "Dynamic interface", 0,
-    1,0,0,
-    ctl_open, NULL, NULL, NULL, cmsg, ctl_event,
+    1,0,0,0,
+    ctl_open, ctl_close, NULL, NULL, cmsg, ctl_event,
 };
 
 static int cmsg(int type, int verbosity_level, char *fmt, ...)
@@ -80,7 +81,6 @@ static int cmsg(int type, int verbosity_level, char *fmt, ...)
 
 static int ctl_open(int using_stdin, int using_stdout)
 {
-    void *libhandle;
     ControlMode *(* inferface_loader)(void);
     char *path;
     char buff[256];
@@ -110,6 +110,19 @@ static int ctl_open(int using_stdin, int using_stdout)
 
     ctl->verbosity = dynamic_control_mode.verbosity;
     ctl->trace_playing = dynamic_control_mode.trace_playing;
+    ctl->flags = dynamic_control_mode.flags;
+    ctl_close_hook = ctl->close;
+    ctl->close = dynamic_control_mode.close; /* ctl_close() */
 
     return ctl->open(using_stdin, using_stdout);
+}
+
+static void ctl_close(void)
+{
+    if(ctl_close_hook)
+    {
+	ctl_close_hook();
+	dl_free(libhandle);
+	ctl_close_hook = NULL;
+    }
 }

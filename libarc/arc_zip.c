@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
@@ -25,7 +45,7 @@ static unsigned long get_long(char *s)
 	    (unsigned long)p[3]<<24);
 }
 
-ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
+ArchiveEntryNode *next_zip_entry(void)
 {
     unsigned long magic;
     unsigned short flen, elen, hdrsiz;
@@ -37,8 +57,8 @@ ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
     unsigned short flags;
     int macbin_check;
 
-    url = archiver->decode_stream;
-    macbin_check = (archiver->nfiles == 0);
+    url = arc_handler.url;
+    macbin_check = (arc_handler.counter == 0);
 
   retry_read:
     if(url_read(url, buff, 4) != 4)
@@ -59,8 +79,8 @@ ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
     {
 	macbin_check = 0;
 	url_skip(url, 128-4);
-	if(archiver->type == AHANDLER_SEEK)
-	    archiver->pos += 128;
+	if(arc_handler.isfile)
+	    arc_handler.pos += 128;
 	goto retry_read;
     }
 
@@ -105,10 +125,12 @@ ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
 	break;
       case 6: /* The file is Imploded */
 	if(flags & 4)
+	{
 	    if(flags & 2)
 		method = ARCHIVEC_IMPLODED_LIT8;
 	    else
 		method = ARCHIVEC_IMPLODED_LIT4;
+	}
 	else if(flags & 2)
 	    method = ARCHIVEC_IMPLODED_NOLIT8;
 	else
@@ -173,12 +195,12 @@ ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
     {
 	url_skip(url, elen);
 	hdrsiz += elen;
-	if(archiver->type == AHANDLER_SEEK)
-	    archiver->pos += hdrsiz;
+	if(arc_handler.isfile)
+	  arc_handler.pos += hdrsiz;
 	goto retry_read;
     }
 
-    entry = new_entry_node(&archiver->pool, buff, flen);
+    entry = new_entry_node(buff, flen);
     if(entry == NULL)
 	return NULL;
 
@@ -190,31 +212,23 @@ ArchiveEntryNode *next_zip_entry(ArchiveHandler archiver)
     url_skip(url, elen);
     hdrsiz += elen;
 
-    if(archiver->type == AHANDLER_SEEK)
+    if(arc_handler.isfile)
     {
-	entry->strmtype = ARCSTRM_SEEK_URL;
-	archiver->pos += hdrsiz;
-	entry->u.seek_start = archiver->pos;
+      arc_handler.pos += hdrsiz;
+	entry->start = arc_handler.pos;
+	entry->cache = NULL;
 	url_skip(url, compsize);
-	archiver->pos += compsize;
+	arc_handler.pos += compsize;
     }
     else
     {
-	char buff[BUFSIZ];
-	long rest, n;
-
-	entry->strmtype = ARCSTRM_MEMBUFFER;
-	rest = compsize;
-	while(rest > 0)
+      long n;
+      entry->start = 0;
+      entry->cache = url_dump(url, compsize, &n);
+      if(n != compsize)
 	{
-	    n = rest;
-	    if(n > sizeof(buff))
-		n = sizeof(buff);
-	    n = url_read(url, buff, n);
-	    if(n <= 0)
-		break;
-	    push_memb(&entry->u.compdata, buff, n);
-	    rest -= n;
+	  free_entry_node(entry);
+	  return NULL;
 	}
     }
 

@@ -1,5 +1,5 @@
 # TiMidity++ -- MIDI to WAVE converter and player
-# Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+# Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
 # Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 #
 # This program is free software; you can redistribute it and/or modify
@@ -14,20 +14,21 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 include $(top_builddir)/common.makefile
 
 INCLUDES = \
 	-I$(top_srcdir)/libarc \
-	-I$(top_srcdir)/timidity \
-	$(EXTRAINCS)
+	-I$(top_srcdir)/timidity
 
 noinst_LIBRARIES = libutils.a
 
 libutils_a_SOURCES = \
 	bitset.c \
 	bitset.h \
+	fft4g.c \
+	fft4g.h \
 	mblock.c \
 	mblock.h \
 	memb.c \
@@ -37,6 +38,7 @@ libutils_a_SOURCES = \
 	strtab.c \
 	strtab.h \
 	support.c \
+	support.h \
 	timer.c \
 	timer.h
 
@@ -69,5 +71,3 @@ libutils_a_LIBADD = \
 	$(NET_OBJS) \
 	$(W32READDIR_OBJS) \
 	$(SOUND_SPEC_OBJS)
-
-libutils_a_DEPENDENCIES = $(libutils_a_LIBADD)

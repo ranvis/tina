@@ -1,8 +1,8 @@
-/*
-
+/* -*- c-file-style: "gnu" -*-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+    ALSA 0.[56] support by Katsuhiro Ueno <katsu@blue.sky.or.jp>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,11 +16,11 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-    linux_audio.c
+    alsa_a.c
 
-    Functions to play sound on the VoxWare audio driver (Linux or FreeBSD)
+    Functions to play sound on the ALSA audio driver
 
 */
 
@@ -42,6 +42,16 @@
 /*ALSA header file*/
 #include <sys/asoundlib.h>
 
+#if defined(SND_LIB_MINOR)
+#define ALSA_LIB  SND_LIB_MINOR
+#else
+#define ALSA_LIB  3
+#endif
+
+#if ALSA_LIB < 4
+typedef void  snd_pcm_t;
+#endif
+
 #include "timidity.h"
 #include "common.h"
 #include "output.h"
@@ -51,85 +61,31 @@
 #include "playmidi.h"
 #include "miditrace.h"
 
-/* Define if you want to use soft audio buffering (AUDIO_FILLING_SEC sec.) */
-/* #define AUDIO_FILLING_MILSEC 3000 */
-
-/* Defined if you want to use initial audio buffering */
-/* #define INITIAL_FILLING */
-
 static int open_output(void); /* 0=success, 1=warning, -1=fatal error */
 static void close_output(void);
-static void output_data(int32 *buf, int32 count);
-static int flush_output(void);
-static void purge_output(void);
-static int32 current_samples(void);
-static int play_loop(void);
-static int32 play_counter, reset_samples;
-static double play_start_time;
-static int noblocking_flag;
-
-extern int default_play_event(void *);
+static int output_data(char *buf, int32 nbytes);
+static int acntl(int request, void *arg);
+static int total_bytes;
+static int output_counter;
+#if ALSA_LIB >= 5
+static int bytes_to_go;
+#endif
 
 /* export the playback mode */
 
 #define dpm alsa_play_mode
 
 PlayMode dpm = {
-  DEFAULT_RATE, PE_16BIT|PE_SIGNED, PF_NEED_INSTRUMENTS|PF_CAN_TRACE,
+  DEFAULT_RATE, PE_16BIT|PE_SIGNED, PF_PCM_STREAM|PF_CAN_TRACE|PF_BUFF_FRAGM_OPT,
   -1,
   {0}, /* default: get all the buffer fragments you can */
   "ALSA pcm device", 's',
   "/dev/snd/pcm00",
-  default_play_event,
   open_output,
   close_output,
   output_data,
-  flush_output,
-  purge_output,
-  current_samples,
-  play_loop
+  acntl
 };
-
-
-/* Must be multiple of 4 */
-#define BUCKETSIZE (((16 * 1024) - 2 * sizeof(int) - sizeof(void *)) & ~3)
-
-typedef struct _AudioBucket
-{
-    char data[BUCKETSIZE];
-    int pos, len;
-    struct _AudioBucket *next;
-} AudioBucket;
-
-static AudioBucket *head = NULL;
-static AudioBucket *tail = NULL;
-static int audio_bucket_size = 0;
-static void initialize_audio_bucket(void);
-static void reuse_audio_bucket(AudioBucket *bucket);
-static void reuse_audio_bucket_list(AudioBucket *bucket);
-static AudioBucket *new_allocated_bucket(void);
-static void flush_buckets(void);
-#define BUCKET_LIST_INIT(head, tail) head = tail = NULL
-
-#define ADD_BUCKET(head, tail, bucket)	\
-    if(head == NULL)			\
-	head = tail = bucket;		\
-    else				\
-	tail = tail->next = bucket
-
-#define ADD_BUCKET_LIST(head, tail, bucket)	\
-    if(head == NULL)				\
-	head = tail = bucket;			\
-    else if(bucket)				\
-	tail = tail->next = bucket;		\
-    if(tail) while(tail->next) tail = tail->next
-
-
-#ifdef INITIAL_FILLING
-static int filling_flag;
-#endif /* INITIAL_FILLING */
-static int32 max_audio_buffersize;
-
 
 /*************************************************************************/
 /* We currently only honor the PE_MONO bit, the sample rate, and the
@@ -139,10 +95,10 @@ static int32 max_audio_buffersize;
 
 
 /*ALSA PCM handler*/
-static void* handle = NULL;
+static snd_pcm_t* handle = NULL;
 static int card = 0;
 static int device = 0;
-
+static int frag_size = 0;
 
 static void error_report (int snd_error)
 {
@@ -159,7 +115,7 @@ static int check_sound_cards (int* card__, int* device__,
   /*Search sound cards*/
   struct snd_ctl_hw_info ctl_hw_info;
   snd_pcm_info_t pcm_info;
-  void* ctl_handle;
+  snd_ctl_t* ctl_handle;
   const char* env_sound_card = getenv ("TIMIDITY_SOUND_CARD");
   const char* env_pcm_device = getenv ("TIMIDITY_PCM_DEVICE");
   int tmp;
@@ -172,7 +128,7 @@ static int check_sound_cards (int* card__, int* device__,
   *device__ = 0;
   if (env_pcm_device != NULL)
     *device__ = atoi (env_pcm_device);
-  
+
   tmp = snd_cards ();
   if (tmp == 0)
     {
@@ -184,7 +140,7 @@ static int check_sound_cards (int* card__, int* device__,
       error_report (tmp);
       return -1;
     }
-  
+
   if (*card__ < 0 || *card__ >= tmp)
     {
       ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "There is %d sound cards."
@@ -194,7 +150,7 @@ static int check_sound_cards (int* card__, int* device__,
     }
 
   tmp = snd_ctl_open (&ctl_handle, *card__);
-  if (tmp != 0)
+  if (tmp < 0)
     {
       error_report (tmp);
       return -1;
@@ -210,7 +166,7 @@ static int check_sound_cards (int* card__, int* device__,
       snd_ctl_close (ctl_handle);
       return -1;
     }
-  
+
   if (*device__ < 0 || *device__ >= ctl_hw_info.pcmdevs)
     {
       ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
@@ -218,7 +174,7 @@ static int check_sound_cards (int* card__, int* device__,
 		" %d is invalid pcm device. assuming 0.",
 		*card__, ctl_hw_info.longname, ctl_hw_info.pcmdevs, *device__);
       *device__ = 0;
-      
+
       if (ctl_hw_info.pcmdevs == 0)
 	{/*sound card has no pcm devices*/
 	  snd_ctl_close (ctl_handle);
@@ -228,13 +184,13 @@ static int check_sound_cards (int* card__, int* device__,
 
   /*check whether pcm device is able to playback*/
   tmp = snd_ctl_pcm_info(ctl_handle, *device__, &pcm_info);
-  if (tmp != 0)
+  if (tmp < 0)
     {
       error_report (tmp);
       snd_ctl_close (ctl_handle);
       return -1;
     }
-  
+
   if ((pcm_info.flags & SND_PCM_INFO_PLAYBACK) == 0)
     {
       ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
@@ -246,9 +202,9 @@ static int check_sound_cards (int* card__, int* device__,
       snd_ctl_close (ctl_handle);
       return -1;
     }
-  
+
   tmp = snd_ctl_close (ctl_handle);
-  if (tmp != 0)
+  if (tmp < 0)
     {
       error_report (tmp);
       return -1;
@@ -261,71 +217,113 @@ static int check_sound_cards (int* card__, int* device__,
                == 1 warning
                == -1 fails
  */
-static int set_playback_info (void* handle__,
+static int set_playback_info (snd_pcm_t* handle__,
 			      int32* encoding__, int32* rate__,
 			      const int32 extra_param[5])
 {
   int ret_val = 0;
+#if ALSA_LIB < 5
   const int32 orig_encoding = *encoding__;
+#endif
   const int32 orig_rate = *rate__;
-  snd_pcm_playback_info_t playback_info;
-  snd_pcm_format_t pcm_format;
-  struct snd_pcm_playback_params playback_params;
   int tmp;
+#if ALSA_LIB >= 5
+  snd_pcm_channel_info_t   pinfo;
+  snd_pcm_channel_params_t pparams;
+  snd_pcm_channel_setup_t  psetup;
+#else
+  snd_pcm_playback_info_t pinfo;
+  snd_pcm_format_t pcm_format;
+  struct snd_pcm_playback_params pparams;
+  struct snd_pcm_playback_status pstatus;
   memset (&pcm_format, 0, sizeof (pcm_format));
-  memset (&playback_params, 0, sizeof (playback_params));
-  
-  tmp = snd_pcm_playback_info (handle__, &playback_info);
-  if (tmp != 0)
+#endif
+  memset (&pparams, 0, sizeof (pparams));
+
+#if ALSA_LIB >= 5
+  memset (&pinfo, 0, sizeof (pinfo));
+  pinfo.channel = SND_PCM_CHANNEL_PLAYBACK;
+  tmp = snd_pcm_channel_info (handle__, &pinfo);
+#else
+  tmp = snd_pcm_playback_info (handle__, &pinfo);
+#endif
+  if (tmp < 0)
     {
       error_report (tmp);
       return -1;
     }
 
   /*check sample bit*/
-  if ((playback_info.flags & SND_PCM_PINFO_8BITONLY) != 0)
-    *encoding__ &= ~PE_16BIT;/*force 8bit samles*/
-  if ((playback_info.flags & SND_PCM_PINFO_16BITONLY) != 0)
-    *encoding__ |= PE_16BIT;/*force 16bit samples*/
-  
+#if ALSA_LIB >= 5
+  if (!(pinfo.formats & ~(SND_PCM_FMT_S8 | SND_PCM_FMT_U8)))
+    *encoding__ &= ~PE_16BIT; /*force 8bit samples*/
+  if (!(pinfo.formats & ~(SND_PCM_FMT_S16 | SND_PCM_FMT_U16)))
+    *encoding__ |= PE_16BIT; /*force 16bit samples*/
+#else
+  if ((pinfo.flags & SND_PCM_PINFO_8BITONLY) != 0)
+    *encoding__ &= ~PE_16BIT; /*force 8bit samples*/
+  if ((pinfo.flags & SND_PCM_PINFO_16BITONLY) != 0)
+    *encoding__ |= PE_16BIT; /*force 16bit samples*/
+#endif
+
   /*check rate*/
-  if (playback_info.min_rate > *rate__)
-    *rate__ = playback_info.min_rate;
-  if (playback_info.max_rate < *rate__)
-    *rate__ = playback_info.max_rate;
+  if (pinfo.min_rate > *rate__)
+    *rate__ = pinfo.min_rate;
+  if (pinfo.max_rate < *rate__)
+    *rate__ = pinfo.max_rate;
+#if ALSA_LIB >= 5
+  pparams.format.rate = *rate__;
+#else
   pcm_format.rate = *rate__;
+#endif
 
   /*check channels*/
-  if ((*encoding__ & PE_MONO) != 0 && playback_info.min_channels > 1)
+#if ALSA_LIB >= 5
+  if ((*encoding__ & PE_MONO) != 0 && pinfo.min_voices > 1)
     *encoding__ &= ~PE_MONO;
-  if ((*encoding__ & PE_MONO) == 0 && playback_info.max_channels < 2)
+  if ((*encoding__ & PE_MONO) == 0 && pinfo.max_voices < 2)
     *encoding__ |= PE_MONO;
-  
+
   if ((*encoding__ & PE_MONO) != 0)
-    pcm_format.channels = 1;/*mono*/
+    pparams.format.voices = 1; /*mono*/
   else
-    pcm_format.channels = 2;/*stereo*/
+    pparams.format.voices = 2; /*stereo*/
+#else /* ALSA_LIB < 5 */
+  if ((*encoding__ & PE_MONO) != 0 && pinfo.min_channels > 1)
+    *encoding__ &= ~PE_MONO;
+  if ((*encoding__ & PE_MONO) == 0 && pinfo.max_channels < 2)
+    *encoding__ |= PE_MONO;
+
+  if ((*encoding__ & PE_MONO) != 0)
+    pcm_format.channels = 1; /*mono*/
+  else
+    pcm_format.channels = 2; /*stereo*/
+#endif
 
   /*check format*/
   if ((*encoding__ & PE_16BIT) != 0)
-    {/*16bit*/
-      if ((playback_info.formats & SND_PCM_FMT_S16_LE) != 0)
+    { /*16bit*/
+      if ((pinfo.formats & SND_PCM_FMT_S16_LE) != 0)
 	{
+#if ALSA_LIB >= 5
+	  pparams.format.format = SND_PCM_SFMT_S16_LE;
+#else
 	  pcm_format.format = SND_PCM_SFMT_S16_LE;
+#endif
 	  *encoding__ |= PE_SIGNED;
 	}
 #if 0
-      else if ((playback_info.formats & SND_PCM_FMT_U16_LE) != 0)
+      else if ((pinfo.formats & SND_PCM_FMT_U16_LE) != 0)
 	{
 	  pcm_format.format = SND_PCM_SFMT_U16_LE;
 	  *encoding__ &= ~PE_SIGNED;
 	}
-      else if ((playback_info.formats & SND_PCM_FMT_S16_BE) != 0)
+      else if ((pinfo.formats & SND_PCM_FMT_S16_BE) != 0)
 	{
 	  pcm_format.format = SND_PCM_SFMT_S16_BE;
 	  *encoding__ |= PE_SIGNED;
 	}
-      else if ((playback_info.formats & SND_PCM_FMT_U16_BE) != 0)
+      else if ((pinfo.formats & SND_PCM_FMT_U16_BE) != 0)
 	{
 	  pcm_format.format = SND_PCM_SFMT_U16_LE;
 	  *encoding__ &= ~PE_SIGNED;
@@ -334,20 +332,24 @@ static int set_playback_info (void* handle__,
       else
 	{
 	  ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
-		    "%s doesn't support mono or stereo samples",
+		    "%s doesn't support 16 bit sample width",
 		    dpm.name);
 	  return -1;
 	}
     }
   else
-    {/*8bit*/
-      if ((playback_info.formats & SND_PCM_FMT_U8) != 0)
+    { /*8bit*/
+      if ((pinfo.formats & SND_PCM_FMT_U8) != 0)
 	{
+#if ALSA_LIB >= 5
+	  pparams.format.format = SND_PCM_SFMT_U8;
+#else
 	  pcm_format.format = SND_PCM_SFMT_U8;
+#endif
 	  *encoding__ &= ~PE_SIGNED;
 	}
 #if 0
-      else if ((playback_info.formats & SND_PCM_FMT_S8) != 0)
+      else if ((pinfo.formats & SND_PCM_FMT_S8) != 0)
 	{
 	  pcm_format.format = SND_PCM_SFMT_U16_LE;
 	  *encoding__ |= PE_SIGNED;
@@ -356,15 +358,16 @@ static int set_playback_info (void* handle__,
       else
 	{
 	  ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
-		    "%s doesn't support mono or stereo samples",
+		    "%s doesn't support 8 bit sample width",
 		    dpm.name);
 	  return -1;
 	}
     }
 
-  
+
+#if ALSA_LIB < 5
   tmp = snd_pcm_playback_format (handle__, &pcm_format);
-  if (tmp != 0)
+  if (tmp < 0)
     {
       error_report (tmp);
       return -1;
@@ -383,75 +386,160 @@ static int set_playback_info (void* handle__,
 		((*encoding__ & PE_MONO) != 0)? "mono" : "stereo");
       ret_val = 1;
     }
-  if (pcm_format.rate != orig_rate)
-    {
-      ctl->cmsg(CMSG_WARNING, VERB_VERBOSE,
-                "Output rate adjusted to %d Hz (requested %d Hz)",
-		pcm_format.rate, orig_rate);
-      ret_val = 1;
-    }
-  
-  /* Set buffer fragments (in extra_param[0]) */
-  tmp = AUDIO_BUFFER_BITS;
-  if (!(*encoding__ & PE_MONO))
-    tmp++;
-  if (*encoding__ & PE_16BIT)
-    tmp++;
-#if 0
-  tmp++;
-  playback_params.fragment_size = (1 << tmp);
-  if (extra_param[0] == 0)
-    playback_params.fragments_max = 7;/*default value. What's value is apporpriate?*/
-  else
-    playback_params.fragments_max = extra_param[0];
-#else
-  playback_params.fragment_size = (1 << tmp);
-  if (extra_param[0] == 0)
-    playback_params.fragments_max = 15;/*default value. What's value is apporpriate?*/
-  else
-    playback_params.fragments_max = extra_param[0];
 #endif
-  playback_params.fragments_room = 1;
-  tmp = snd_pcm_playback_params (handle__, &playback_params);
-  if (tmp != 0)
+
+  /* Set buffer fragment size (in extra_param[1]) */
+  if (extra_param[1] != 0)
+    tmp = extra_param[1];
+  else
     {
+      tmp = audio_buffer_size;
+      if (!(*encoding__ & PE_MONO))
+	tmp <<= 1;
+      if (*encoding__ & PE_16BIT)
+	tmp <<= 1;
+    }
+
+  /* Set buffer fragments (in extra_param[0]) */
+#if ALSA_LIB >= 5
+#if ALSA_LIB >= 6
+  pparams.frag_size = tmp;
+  if (extra_param[0] == 0)
+    pparams.buffer_size = pinfo.buffer_size;
+  else
+   {
+     int frags = extra_param[0] - (extra_param[0] % pinfo.fragment_align);
+     if (frags > pinfo.max_fragment_size)
+       frags = pinfo.max_fragment_size;
+     if (frags < pinfo.min_fragment_size)
+       frags = pinfo.min_fragment_size; 
+     pparams.buffer_size = tmp * frags;
+   }
+  pparams.buf.block.frags_xrun_max = 0;
+  pparams.buf.block.frags_min = 1;
+#else
+  pparams.buf.block.frag_size = tmp;
+  pparams.buf.block.frags_max = (extra_param[0] == 0) ? -1 : extra_param[0];
+  pparams.buf.block.frags_min = 1;
+#endif
+
+  pparams.mode = SND_PCM_MODE_BLOCK;
+  pparams.channel = SND_PCM_CHANNEL_PLAYBACK;
+  pparams.start_mode = SND_PCM_START_GO;
+#if ALSA_LIB >= 6
+  pparams.xrun_mode  = SND_PCM_XRUN_FLUSH;
+#else
+  pparams.stop_mode  = SND_PCM_STOP_STOP;
+#endif
+  pparams.format.interleave = 1;
+
+  snd_pcm_channel_flush (handle__, SND_PCM_CHANNEL_PLAYBACK);
+  tmp = snd_pcm_channel_params (handle__, &pparams);
+#else
+  pparams.fragment_size  = tmp;
+  pparams.fragments_max  = (extra_param[0] == 0) ? -1 : extra_param[0];
+  pparams.fragments_room = 1;
+  tmp = snd_pcm_playback_params (handle__, &pparams);
+#endif /* ALSA_LIB >= 5 */
+  if (tmp < 0)
+    {
+#if ALSA_LIB >= 6
+      ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+		"%s doesn't support buffer fragments"
+		":request frag_size=%d, buffer_size=%d, min=%d\n",
+		dpm.name,
+		pparams.frag_size,
+		pparams.buffer_size,
+		pparams.buf.block.frags_min);
+#elif ALSA_LIB == 5
+      ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+		"%s doesn't support buffer fragments"
+		":request size=%d, max=%d, min=%d\n",
+		dpm.name,
+		pparams.buf.block.frag_size,
+		pparams.buf.block.frags_max,
+		pparams.buf.block.frags_min);
+#else
       ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
 		"%s doesn't support buffer fragments"
 		":request size=%d, max=%d, room=%d\n",
 		dpm.name,
-		playback_params.fragment_size,
-		playback_params.fragments_max,
-		playback_params.fragments_room);
+		pparams.fragment_size,
+		pparams.fragments_max,
+		pparams.fragments_room);
+#endif
       ret_val =1;
     }
 
-  return ret_val;
-}
-
-static void set_block_mode (void* handle__, int enable)
-{
-  int ret = snd_pcm_block_mode (handle__, enable);
-  if (ret != 0)
+#if ALSA_LIB >= 5
+  tmp = snd_pcm_channel_prepare (handle__, SND_PCM_CHANNEL_PLAYBACK);
+  if (tmp < 0)
     {
-      error_report (ret);
-      sleep(3);
+      ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+		"unable to prepare channel\n");
+      return -1;
     }
+#endif
+
+#if ALSA_LIB >= 5
+  memset (&psetup, 0, sizeof(psetup));
+  psetup.channel = SND_PCM_CHANNEL_PLAYBACK;
+  tmp = snd_pcm_channel_setup (handle__, &psetup);
+  if (tmp == 0)
+    {
+      if(psetup.format.rate != orig_rate)
+        {
+	  ctl->cmsg(CMSG_WARNING, VERB_VERBOSE,
+		    "Output rate adjusted to %d Hz (requested %d Hz)",
+		    psetup.format.rate, orig_rate);
+	  dpm.rate = psetup.format.rate;
+	  ret_val = 1;
+	}
+#if ALSA_LIB >= 6
+      frag_size = psetup.frag_size;
+      total_bytes = frag_size * psetup.frags;
+#else
+      frag_size = psetup.buf.block.frag_size;
+      total_bytes = frag_size * psetup.buf.block.frags;
+#endif
+      bytes_to_go = total_bytes;
+    }
+#else /* ALSA_LIB < 5 */
+  if (snd_pcm_playback_status(handle__, &pstatus) == 0)
+    {
+      if (pstatus.rate != orig_rate)
+	{
+	  ctl->cmsg(CMSG_WARNING, VERB_VERBOSE,
+		    "Output rate adjusted to %d Hz (requested %d Hz)",
+		    pstatus.rate, orig_rate);
+	  dpm.rate = pstatus.rate;
+	  ret_val = 1;
+	}
+      frag_size = pstatus.fragment_size;
+      total_bytes = pstatus.count;
+    }
+#endif
+  else
+    {
+      frag_size = 0;
+      total_bytes = -1; /* snd_pcm_playback_status fails */
+    }
+
+  return ret_val;
 }
 
 static int open_output(void)
 {
   int tmp, warnings=0;
   int ret;
-  
-  play_counter = reset_samples = 0;
 
   tmp = check_sound_cards (&card, &device, dpm.extra_param);
-  if (tmp != 0)
+  if (tmp < 0)
     return -1;
-  
+
   /* Open the audio device */
   ret = snd_pcm_open (&handle, card, device, SND_PCM_OPEN_PLAYBACK);
-  if (ret != 0)
+  if (ret < 0)
     {
       ctl->cmsg(CMSG_ERROR, VERB_NORMAL, "%s: %s",
 		dpm.name, snd_strerror (ret));
@@ -462,342 +550,234 @@ static int open_output(void)
   dpm.encoding &= ~(PE_ULAW|PE_ALAW|PE_BYTESWAP);
   warnings = set_playback_info (handle, &dpm.encoding, &dpm.rate,
 				dpm.extra_param);
-  if (warnings == -1)
+  if (warnings < 0)
     {
       close_output ();
       return -1;
     }
 
-  noblocking_flag = ctl->trace_playing;
-  set_block_mode (handle, noblocking_flag);
-  initialize_audio_bucket();
-  
+#if ALSA_LIB >= 5
+  dpm.fd = snd_pcm_file_descriptor (handle, SND_PCM_CHANNEL_PLAYBACK);
+#else
   dpm.fd = snd_pcm_file_descriptor (handle);
+#endif
+  output_counter = 0;
   return warnings;
 }
 
 static void close_output(void)
 {
   int ret;
-  
+
   if (handle == NULL)
     return;
-  
+
   ret = snd_pcm_close (handle);
-  if (ret != 0)
-    error_report (ret);
+#if ALSA_LIB == 5 /* Maybe alsa-driver 0.5 has a bug */
+  if (ret != -EINVAL)
+#endif
+    if (ret < 0)
+      error_report (ret);
   handle = NULL;
-  
-  flush_buckets();
-  play_counter = reset_samples = 0;
+
   dpm.fd = -1;
 }
 
-static void push_play_bucket(const char *buf, int n)
+static int output_data(char *buf, int32 nbytes)
 {
-    if(buf == NULL || n == 0)
-	return;
+  int n;
+#if ALSA_LIB >= 5
+  snd_pcm_channel_status_t status;
 
-    if(head == NULL)
-	head = tail = new_allocated_bucket();
-
-    audio_bucket_size += n;
-    while(n)
+  n = snd_pcm_write (handle, buf, nbytes);
+  if (n <= 0)
     {
-	int i;
-
-	if(tail->len == BUCKETSIZE)
+      memset (&status, 0, sizeof(status));
+      status.channel = SND_PCM_CHANNEL_PLAYBACK;
+      if (snd_pcm_channel_status(handle, &status) < 0)
 	{
-	    AudioBucket *b;
-	    b = new_allocated_bucket();
-	    ADD_BUCKET(head, tail, b);
+	  ctl->cmsg(CMSG_WARNING, VERB_DEBUG,
+		    "%s: could not get channel status", dpm.name);
+	  return -1;
 	}
-
-	i = BUCKETSIZE - tail->len;
-	if(i > n)
-	    i = n;
-	memcpy(tail->data + tail->len, buf, i);
-
-	buf += i;
-	n   -= i;
-	tail->len += i;
-    }
-}
-
-static void add_sample_counter(int32 count)
-{
-    current_samples(); /* update offset_samples */
-    play_counter += count;
-}
-
-static void output_data(int32 *buf, int32 count)
-{
-  if(count == 0)
-      return;
-  if (!(dpm.encoding & PE_MONO)) count*=2; /* Stereo samples */
-
-  if (dpm.encoding & PE_16BIT)
-    {
-      /* Convert data to signed 16-bit PCM */
-      s32tos16(buf, count);
-      count *= 2;
-    }
-  else
-    {
-      /* Convert to 8-bit unsigned and write out. */
-      s32tou8(buf, count);
-    }
-
-#ifdef INITIAL_FILLING
-    current_samples();
-    if(audio_bucket_size < max_audio_buffersize && play_counter == 0)
-    {
-	filling_flag = 1;
-	push_play_bucket((char *)buf, count);
-    }
-    else
-    {
-	filling_flag = 0;
+#if ALSA_LIB >= 6
+      if (status.status == SND_PCM_STATUS_XRUN)
 #else
-    if(audio_bucket_size == 0)
-	push_play_bucket((char *)buf, count);
-    else
-    {
-#endif /* INITIAL_FILLING */
-	if(audio_bucket_size > max_audio_buffersize)
+      if (status.status == SND_PCM_STATUS_UNDERRUN)
+#endif
 	{
-	    do
-	    {
-		play_loop();
-		trace_loop();
-	    } while(audio_bucket_size > max_audio_buffersize);
+#if ALSA_LIB >= 6
+	  ctl->cmsg(CMSG_INFO, VERB_DEBUG,
+		    "%s: underrun at %d", dpm.name, status.pos_io);
+	  output_counter += status.pos_io;
+#else
+	  ctl->cmsg(CMSG_INFO, VERB_DEBUG,
+		    "%s: underrun at %d", dpm.name, status.scount);
+	  output_counter += status.scount;
+#endif
+	  snd_pcm_channel_flush (handle, SND_PCM_CHANNEL_PLAYBACK);
+	  snd_pcm_channel_prepare (handle, SND_PCM_CHANNEL_PLAYBACK);
+	  bytes_to_go = total_bytes;
+	  n = snd_pcm_write (handle, buf, nbytes);
 	}
-	push_play_bucket((char *)buf, count);
-    }
-}
-
-
-static int flush_output(void)
-{
-    int rc;
-#ifdef INITIAL_FILLING
-    filling_flag = 0;
-#endif /* INITIAL_FILLING */
-
-    if(audio_bucket_size == 0 && play_counter == 0 && reset_samples == 0)
-	return RC_NONE;
-
-    /* extract all trace */
-    if(ctl->trace_playing)
-    {
-	while(trace_loop() && play_loop()) /* Must call both trace/play loop */
+      if (n <= 0)
 	{
-	    rc = check_apply_control();
-	    if(RC_IS_SKIP_FILE(rc))
-	    {
-		purge_output();
-		return rc;
-	    }
-	}
-	while(trace_loop() || play_loop()) /* Call trace or play loop */
-	{
-	    rc = check_apply_control();
-	    if(RC_IS_SKIP_FILE(rc))
-	    {
-		purge_output();
-		return rc;
-	    }
-	}
-    }
-    else
-    {
-	trace_flush();
-	while(play_loop())
-	{
-	    usleep(100000);
-	    rc = check_apply_control();
-	    if(RC_IS_SKIP_FILE(rc))
-	    {
-		purge_output();
-		return rc;
-	    }
+	  ctl->cmsg(CMSG_WARNING, VERB_DEBUG,
+		    "%s: %s", dpm.name,
+		    (n < 0) ? snd_strerror(n) : "write error");
+	  if (n != -EPIPE)  /* buffer underrun is ignored */
+	    return -1;
 	}
     }
 
-    /* wait until play out */
-    do
-    {
-	usleep(100000);
-	rc = check_apply_control();
-	if(RC_IS_SKIP_FILE(rc))
-	{
-	    purge_output();
-	    return rc;
-	}
-	current_samples();
-    } while(play_counter > 0);
-
-    /*ioctl(dpm.fd, SNDCTL_DSP_SYNC);*/
-    if (snd_pcm_flush_playback (handle) != 0)
-      {
-	/*error!*/
+  if (bytes_to_go > 0) {
+    bytes_to_go -= nbytes;
+    if (bytes_to_go <= 0) {
+      if (snd_pcm_channel_go(handle, SND_PCM_CHANNEL_PLAYBACK) < 0) {
+	ctl->cmsg(CMSG_WARNING, VERB_DEBUG,
+		  "%s: could not start playing", dpm.name);
+	return -1;
       }
-    play_counter = reset_samples = 0;
-
-    return RC_NONE;
-}
-
-static void purge_output(void)
-{
-    /*ioctl(dpm.fd, SNDCTL_DSP_RESET);*/
-    int ret = snd_pcm_drain_playback (handle);
-    if (ret != 0)
-      {
-	/* error !*/
-      }
-    flush_buckets();
-    play_counter = reset_samples = 0;
-}
-
-static void flush_buckets(void)
-{
-    reuse_audio_bucket_list(head);
-    BUCKET_LIST_INIT(head, tail);
-    audio_bucket_size = 0;
-}
-
-static int32 current_samples(void)
-{
-    double realtime, es;
-
-    realtime = get_current_calender_time();
-    if(play_counter == 0)
-    {
-	play_start_time = realtime;
-	return reset_samples;
     }
-    es = dpm.rate * (realtime - play_start_time);
-    if(es >= play_counter)
+  }
+
+#else /* ALSA_LIB < 5 */
+  while (nbytes > 0)
     {
-	/* out of play counter */
-	reset_samples += play_counter;
-	play_counter = 0;
-	play_start_time = realtime;
-	return reset_samples;
+      n = snd_pcm_write (handle, buf, nbytes);
+
+      if (n < 0)
+        {
+	  ctl->cmsg(CMSG_WARNING, VERB_DEBUG,
+		    "%s: %s", dpm.name, snd_strerror(n));
+	  if (n == -EWOULDBLOCK)
+	    continue;
+	  return -1;
+	}
+      buf += n;
+      nbytes -= n;
+      output_counter += n;
     }
-    if(es < 0)
-	return 0; /* for safety */
-    return (int32)es + reset_samples;
+#endif
+
+  return 0;
 }
 
-static int play_loop(void)
+static int acntl(int request, void *arg)
 {
-    AudioBucket *tmp;
-    int bpf; /* Bytes per sample frame */
-    int fd;
+  int i;
+#if ALSA_LIB >= 5
+  snd_pcm_channel_status_t pstatus;
+  memset (&pstatus, 0, sizeof (pstatus));
+  pstatus.channel = SND_PCM_CHANNEL_PLAYBACK;
+#else
+  struct snd_pcm_playback_status pstatus;
+#endif
 
-    ctl->cmsg(CMSG_INFO, VERB_DEBUG_SILLY,
-	      "Audio Soft Buffer: %d", audio_bucket_size);
-
-#ifdef INITIAL_FILLING
-    if(filling_flag)
+  switch (request)
+    {
+      case PM_REQ_GETFRAGSIZ:
+	if (frag_size == 0)
+	  return -1;
+	*((int *)arg) = frag_size;
 	return 0;
-#endif /* INITIAL_FILLING */
 
-    fd = dpm.fd;
+      case PM_REQ_GETQSIZ:
+	if (total_bytes == -1)
+	  return -1;
+	*((int *)arg) = total_bytes;
+	return 0;
 
-    /* ctl->trace_playing can be changed in `N' interface */
-    if(noblocking_flag != ctl->trace_playing)
-    {
-	noblocking_flag = ctl->trace_playing;
-	set_block_mode (handle, noblocking_flag);
-    }
-
-    bpf = 1;
-    if(!(dpm.encoding & PE_MONO))
-	bpf = 2;
-    if(dpm.encoding & PE_16BIT)
-	bpf *= 2;
-
-    while(head)
-    {
-	if(head->pos < head->len)
-	{
-	    int n;
-
-	    /*n = write(fd, head->data + head->pos, head->len - head->pos);*/
-	    n = snd_pcm_write (handle,
-			       head->data + head->pos, head->len - head->pos);
-	    /*if(n == -1)*/
-	    if(n < 0)
-	    {
-                 /*if(errno == EWOULDBLOCK)*/
-	        if(n == EWOULDBLOCK)
-		    return 1;
-		return 0;
-	    }
-	    audio_bucket_size -= n;
-	    head->pos += n;
-	    add_sample_counter(n / bpf);
-	}
-	if(head->pos != head->len)
-	    return 1;
-	tmp = head;
-	head = head->next;
-	reuse_audio_bucket(tmp);
-    }
-    return 0;
-}
-
-#ifdef AUDIO_FILLING_MILSEC
-#define ALLOCATED_N_BUCKET 32
+      case PM_REQ_GETFILLABLE:
+	if (total_bytes == -1)
+	  return -1;
+#if ALSA_LIB >= 5
+	if (snd_pcm_channel_status(handle, &pstatus) < 0)
+	  return -1;
+#if ALSA_LIB >= 6
+	i = pstatus.bytes_free;
 #else
-#define ALLOCATED_N_BUCKET 4
-#endif /* AUDIO_FILLING_MILSEC */
+	i = pstatus.free;
+#endif
+#else /* ALSA_LIB < 5 */
+	if (snd_pcm_playback_status(handle, &pstatus) < 0)
+	  return -1;
+	i = pstatus.count;
+#endif
+	if(!(dpm.encoding & PE_MONO)) i >>= 1;
+	if(dpm.encoding & PE_16BIT) i >>= 1;
+	*((int *)arg) = i;
+	return 0;
 
-static AudioBucket *allocated_bucket_list = NULL;
+      case PM_REQ_GETFILLED:
+	if (total_bytes == -1)
+	  return -1;
+#if ALSA_LIB >= 5
+	if (snd_pcm_channel_status(handle, &pstatus) < 0)
+	  return -1;
+#if ALSA_LIB >= 6
+	i = pstatus.bytes_used;
+#else
+	i = pstatus.count;
+#endif
+#else /* ALSA_LIB < 5 */
+	if (snd_pcm_playback_status(handle, &pstatus) < 0)
+	  return -1;
+	i = pstatus.queue;
+#endif
+	if(!(dpm.encoding & PE_MONO)) i >>= 1;
+	if(dpm.encoding & PE_16BIT) i >>= 1;
+	*((int *)arg) = i;
+	return 0;
 
-static void initialize_audio_bucket(void)
-{
-    int i;
-    AudioBucket *b;
+      case PM_REQ_GETSAMPLES:
+	if (total_bytes == -1)
+	  return -1;
+#if ALSA_LIB >= 5
+	if (snd_pcm_channel_status(handle, &pstatus) < 0)
+	  return -1;
+#if ALSA_LIB >= 6
+	i = output_counter + pstatus.pos_io;
+#else
+	i = output_counter + pstatus.scount;
+#endif
+#else
+	if (snd_pcm_playback_status(handle, &pstatus) < 0)
+	  return -1;
+	i = output_counter - pstatus.queue;
+#endif
+	if (!(dpm.encoding & PE_MONO)) i >>= 1;
+	if (dpm.encoding & PE_16BIT) i >>= 1;
+	*((int *)arg) = i;
+	return 0;
 
-    b = (AudioBucket *)safe_malloc(ALLOCATED_N_BUCKET * sizeof(AudioBucket));
-    for(i = 0; i < ALLOCATED_N_BUCKET; i++)
-	reuse_audio_bucket(b + i);
-}
+      case PM_REQ_DISCARD:
+#if ALSA_LIB >= 5
+	if (snd_pcm_playback_drain(handle) < 0)
+	  return -1;
+	if (snd_pcm_channel_prepare(handle, SND_PCM_CHANNEL_PLAYBACK) < 0)
+	  return -1;
+	bytes_to_go = total_bytes;
+#else
+	if (snd_pcm_drain_playback (handle) < 0)
+	  return -1; /* error */
+#endif
+	output_counter = 0;
+	return 0;
 
-static AudioBucket *new_allocated_bucket(void)
-{
-    AudioBucket *b;
-
-    if(allocated_bucket_list == NULL)
-	b = (AudioBucket *)safe_malloc(sizeof(AudioBucket));
-    else
-    {
-	b = allocated_bucket_list;
-	allocated_bucket_list = allocated_bucket_list->next;
+      case PM_REQ_FLUSH:
+#if ALSA_LIB >= 5
+	if (snd_pcm_channel_flush(handle, SND_PCM_CHANNEL_PLAYBACK) < 0)
+	  return -1;
+	if (snd_pcm_channel_prepare(handle, SND_PCM_CHANNEL_PLAYBACK) < 0)
+	  return -1;
+	bytes_to_go = total_bytes;
+#else
+	if (snd_pcm_flush_playback(handle) < 0)
+	  return -1; /* error */
+#endif
+	output_counter = 0;
+	return 0;
     }
-    memset(b, 0, sizeof(AudioBucket));
-    return b;
-}
-
-static void reuse_audio_bucket(AudioBucket *bucket)
-{
-    if(bucket == NULL)
-	return;
-    bucket->next = allocated_bucket_list;
-    allocated_bucket_list = bucket;
-}
-
-static void reuse_audio_bucket_list(AudioBucket *bucket)
-{
-    while(bucket)
-    {
-	AudioBucket *tmp;
-
-	tmp = bucket;
-	bucket = bucket->next;
-	reuse_audio_bucket(tmp);
-    }
+    return -1;
 }

@@ -1,7 +1,7 @@
 /*
-
-    TiMidity -- Experimental MIDI to WAVE converter
-    Copyright (C) 1995 Tuukka Toivonen <toivonen@clinet.fi>
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -15,10 +15,9 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     vt_100_c.c - written by Masanao Izumo <mo@goice.co.jp>
-
     */
 
 #ifdef HAVE_CONFIG_H
@@ -35,12 +34,13 @@
 #include <strings.h>
 #endif
 
-#if !defined(__WIN32__) || defined(__CYGWIN32__)
-#include <unistd.h> /* for sleep */
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif /* HAVE_UNISTD_H */
+
+#ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
-#else
-#include <winsock.h>
-#endif /* __WIN32__ */
+#endif /* HAVE_SYS_TIME_H */
 
 #include "timidity.h"
 #include "common.h"
@@ -53,6 +53,7 @@
 #include "vt100.h"
 #include "timer.h"
 #include "bitset.h"
+#include "aq.h"
 
 #define SCRMODE_OUT_THRESHOLD 10.0
 #define CHECK_NOTE_SLEEP_TIME 5.0
@@ -129,6 +130,7 @@ ControlMode ctl=
 {
     "vt100 interface", 'T',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     dumb_pass_playing_list,
@@ -194,7 +196,7 @@ static void ctl_file_name(char *name)
 
 static void ctl_current_time(int secs, int v)
 {
-    int mins;
+    int mins, bold_flag = 0;
     static int last_voices = -1, last_secs = -1;
 
     if(last_secs != secs)
@@ -205,15 +207,19 @@ static void ctl_current_time(int secs, int v)
 	vt100_move(4, 6);
 	vt100_set_attr(VT100_ATTR_BOLD);
 	printf("%3d:%02d", mins, secs);
+	bold_flag = 1;
     }
 
     if(!ctl.trace_playing || midi_trace.flush_flag)
     {
-	vt100_reset_attr();
+	if(bold_flag)
+	    vt100_reset_attr();
 	return;
     }
 
     vt100_move(4, 47);
+    if(!bold_flag)
+	vt100_set_attr(VT100_ATTR_BOLD);
     printf("%3d", v);
     vt100_reset_attr();
 
@@ -460,8 +466,6 @@ static void ctl_reset(void)
     int i,j,c;
     char *title;
 
-    play_mode->purge_output();
-    trace_flush();
     if (!ctl.trace_playing)
 	return;
     c = (VT100_COLS - 24) / 12 * 12;
@@ -508,7 +512,7 @@ static int ctl_open(int using_stdin, int using_stdout)
     vt100_move(0, 0);
     fprintf(stdout, "TiMidity++ v%s" NLS, timidity_version);
     vt100_move(0, VT100_COLS-45);
-    fputs("(C) 1995 Tuukka Toivonen <toivonen@clinet.fi>", stdout);
+    fputs("(C) 1995 Tuukka Toivonen <tt@cgs.fi>", stdout);
     vt100_move(1,0);
     fputs("vt100 Interface mode - Written by Masanao Izumo <mo@goice.co.jp>", stdout);
 
@@ -652,6 +656,7 @@ static int ctl_read(int32 *valp)
 	  case 'v':
 	    *valp =- 10 * char_count(cmd, cmd[0]);
 	    return RC_CHANGE_VOLUME;
+#if 0
 	  case '1':
 	  case '2':
 	  case '3':
@@ -662,6 +667,7 @@ static int ctl_read(int32 *valp)
 	  case '6':
 	    *valp = cmd[0] - '5';
 	    return RC_CHANGE_REV_TIME;
+#endif
 	  case 's':
 	    return RC_TOGGLE_PAUSE;
 	  case 'n':
@@ -799,7 +805,7 @@ static int cmsg(int type, int verbosity_level, char *fmt, ...)
     return 0;
 }
 
-#if !defined(__WIN32__) || defined(__CYGWIN32__)
+#if !defined(__W32__) || defined(__CYGWIN32__)
 /* UNIX */
 static char *vt100_getline(void)
 {
@@ -830,6 +836,11 @@ static char *vt100_getline(void)
     return NULL;
 }
 #else
+/* Windows */
+
+/* Define VT100_CBREAK_MODE if you want to emulate like ncurses mode */
+/* #define VT100_CBREAK_MODE */
+
 #include <conio.h>
 static char *vt100_getline(void)
 {
@@ -844,6 +855,12 @@ static char *vt100_getline(void)
 	    return "q";
 	if(c == '\r')
 	    c = '\n';
+
+#ifdef VT100_CBREAK_MODE
+	cmd[0] = c;
+	cmd[1] = '\0';
+	return cmd;
+#else
 	if(cmdlen < sizeof(cmd) - 1)
 	    cmd[cmdlen++] = (char)c;
 	if(c == '\n')
@@ -852,6 +869,7 @@ static char *vt100_getline(void)
 	    cmdlen = 0;
 	    return cmd;
 	}
+#endif /* VT100_CBREAK_MODE */
     }
     return NULL;
 }

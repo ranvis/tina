@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
@@ -11,8 +31,13 @@
 #include "timidity.h"
 #include "url.h"
 
+extern char *safe_strdup(char *);
+
 #ifdef __W32READDIR__
 #include "readdir.h"
+# define NAMLEN(dirent) strlen((dirent)->d_name)
+#elif __MACOS__
+# include "mac_readdir.h"
 # define NAMLEN(dirent) strlen((dirent)->d_name)
 #else
 
@@ -35,7 +60,6 @@
 
 #endif
 
-
 #ifdef URL_DIR_CACHE_ENABLE
 #include <sys/stat.h>
 #ifdef HAVE_FCNTL_H
@@ -47,15 +71,29 @@
 #define S_ISDIR(mode)   (((mode)&0xF000) == 0x4000)
 #endif /* S_ISDIR */
 
+#ifdef unix
+#define INODE_AVAILABLE
+#endif /* unix */
+
 struct dir_cache_t
 {
     char **fnames;
+#ifdef INODE_AVAILABLE
     dev_t dev;
     ino_t ino;
+#else
+    char *dirname;
+#endif
     time_t dir_mtime;
     struct dir_cache_t *next;
 };
 static struct dir_cache_t *dir_cache = NULL;
+
+#ifdef INODE_AVAILABLE
+#define REMOVE_CACHE_ENT(p, isalloced) if(isalloced) free(p); else (p)->ino = 0
+#else
+#define REMOVE_CACHE_ENT(p, isalloced) free((p)->dirname); if(isalloced) free(p); else p->dirname = NULL
+#endif /* INODE_AVAILABLE */
 
 static struct dir_cache_t *scan_cached_files(struct dir_cache_t *p,
 					     struct stat *s,
@@ -76,17 +114,18 @@ static struct dir_cache_t *scan_cached_files(struct dir_cache_t *p,
 	allocated = 0;
 
     /* save directory information */
+#ifdef INODE_AVAILABLE
     p->ino = s->st_ino;
     p->dev = s->st_dev;
+#else
+    p->dirname = safe_strdup(dirname);
+#endif /* INODE_AVAILABLE */
     p->dir_mtime = s->st_mtime;
 
     if((dirp = opendir(dirname)) == NULL)
     {
 	url_errno = errno;
-	if(allocated)
-	    free(p);
-	else
-	    p->ino = 0; /* remove directory entry */
+	REMOVE_CACHE_ENT(p, allocated);
 	errno = url_errno;
 	return NULL;
     }
@@ -96,9 +135,10 @@ static struct dir_cache_t *scan_cached_files(struct dir_cache_t *p,
     {
 	int dlen;
 
-	/* Skip removed file. */
+#ifdef INODE_AVAILABLE
 	if(d->d_ino == 0)
 	    continue;
+#endif
 	if((dlen = NAMLEN(d)) == 0)
 	    continue;
 
@@ -107,10 +147,7 @@ static struct dir_cache_t *scan_cached_files(struct dir_cache_t *p,
 	{
 	    url_errno = errno;
 	    delete_string_table(&stab);
-	    if(allocated)
-		free(p);
-	    else
-		p->ino = 0; /* remove directory entry */
+	    REMOVE_CACHE_ENT(p, allocated);
 	    closedir(dirp);
 	    errno = url_errno;
 	    return NULL;
@@ -124,10 +161,7 @@ static struct dir_cache_t *scan_cached_files(struct dir_cache_t *p,
     {
 	url_errno = errno;
 	delete_string_table(&stab);
-	if(allocated)
-	    free(p);
-	else
-	    p->ino = 0; /* remove directory entry */
+	REMOVE_CACHE_ENT(p, allocated);
 	errno = url_errno;
 	return NULL;
     }
@@ -150,7 +184,11 @@ static struct dir_cache_t *read_cached_files(char *dirname)
     q = NULL;
     for(p = dir_cache; p; p = p->next)
     {
+#ifdef INODE_AVAILABLE
 	if(p->ino == 0)
+#else
+	if(p->dirname == NULL)
+#endif /* INODE_AVAILABLE */
 	{
 	    /* Entry is removed.
 	     * Save the entry to `q' which is reused for puting in new entry.
@@ -160,7 +198,12 @@ static struct dir_cache_t *read_cached_files(char *dirname)
 	    continue;
 	}
 
+#ifdef INODE_AVAILABLE
 	if(s.st_dev == p->dev && s.st_ino == p->ino)
+#else
+	if(strcmp(p->dirname, dirname) == 0)
+#endif /* INODE_AVAILABLE */
+
 	{
 	    /* found */
 	    if(p->dir_mtime == s.st_mtime)
@@ -169,6 +212,9 @@ static struct dir_cache_t *read_cached_files(char *dirname)
 	    /* Directory entry is updated */
 	    free(p->fnames[0]);
 	    free(p->fnames);
+#ifndef INODE_AVAILABLE
+	    free(p->dirname);
+#endif /* !INODE_AVAILABLE */
 	    return scan_cached_files(p, &s, dirname);
 	}
     }
@@ -215,9 +261,10 @@ struct URL_module URL_module_dir =
 
 static int name_dir_check(char *url_string)
 {
+    extern char *pathsep_strrchr(char *);
     if(strncasecmp(url_string, "dir:", 4) == 0)
 	return 1;
-    url_string = strrchr(url_string, PATH_SEP);
+    url_string = pathsep_strrchr(url_string);
     return url_string != NULL && *(url_string + 1) == '\0';
 }
 
@@ -226,21 +273,42 @@ URL url_dir_open(char *dname)
 {
     struct dir_cache_t *d;
     URL_dir *url;
+    int dlen;
 
-    if(strncasecmp(dname, "dir:", 4) == 0)
-	dname += 4;
-    if(*dname == '\0')
+    if(dname == NULL)
 	dname = ".";
     else
-	dname = url_expand_home_dir(dname);
+    {
+	if(strncasecmp(dname, "dir:", 4) == 0)
+	    dname += 4;
+	if(*dname == '\0')
+	    dname = ".";
+	else
+	    dname = url_expand_home_dir(dname);
+    }
+    dname = safe_strdup(dname);
+
+    /* Remove tail of path sep. */
+    dlen = strlen(dname);
+    while(dlen > 0 && IS_PATH_SEP(dname[dlen - 1]))
+	dlen--;
+    dname[dlen] = '\0';
+    if(dlen == 0)
+	strcpy(dname, PATH_STRING); /* root */
+
     d = read_cached_files(dname);
     if(d == NULL)
+    {
+	free(dname);
 	return NULL;
+    }
 
     url = (URL_dir *)alloc_url(sizeof(URL_dir));
     if(url == NULL)
     {
 	url_errno = errno;
+	free(dname);
+	errno = url_errno; /* restore errno */
 	return NULL;
     }
 
@@ -258,7 +326,7 @@ URL url_dir_open(char *dname)
     url->ptr = NULL;
     url->len = 0;
     url->total = 0;
-    url->dirname = strdup(dname);
+    url->dirname = dname;
     url->endp = 0;
 
     return (URL)url;
@@ -268,7 +336,6 @@ URL url_dir_open(char *dname)
 {
     URL_dir *url;
     DIR *dirp;
-    char *dirname;
     int dlen;
 
     if(dname == NULL)
@@ -282,24 +349,30 @@ URL url_dir_open(char *dname)
 	else
 	    dname = url_expand_home_dir(dname);
     }
+    dname = safe_strdup(dname);
+
+    /* Remove tail of path sep. */
+    dlen = strlen(dname);
+    while(dlen > 0 && IS_PATH_SEP(dname[dlen - 1]))
+	dlen--;
+    dname[dlen] = '\0';
+    if(dlen == 0)
+	strcpy(dname, PATH_STRING); /* root */
 
     if((dirp = opendir(dname)) == NULL)
-	return NULL;
-    dlen = strlen(dname);
-    if((dirname = (char *)malloc(dlen + 1)) == NULL)
     {
 	url_errno = errno;
-	closedir(dirp);
+	free(dname);
 	errno = url_errno;
 	return NULL;
     }
-    memcpy(dirname, dname, dlen + 1);
 
     url = (URL_dir *)alloc_url(sizeof(URL_dir));
     if(url == NULL)
     {
 	url_errno = errno;
 	closedir(dirp);
+	free(dname);
 	errno = url_errno;
 	return NULL;
     }
@@ -319,7 +392,7 @@ URL url_dir_open(char *dname)
     url->ptr = NULL;
     url->len = 0;
     url->total = 0;
-    url->dirname = strdup(dname);
+    url->dirname = dname;
     url->endp = 0;
 
     return (URL)url;
@@ -398,15 +471,17 @@ static char *url_dir_gets(URL url, char *buff, int n)
 	urlp->fptr++;
 	urlp->len = strlen(urlp->ptr);
 #else
-
 	do
 	    if((urlp->d = readdir(urlp->dirp)) == NULL)
 	    {
 		urlp->endp = 1;
 		return NULL;
 	    }
-	while (urlp->d->d_ino == 0 ||
-	       NAMLEN(urlp->d) == 0);
+        while (
+#ifdef INODE_AVAILABLE
+	       urlp->d->d_ino == 0 ||
+#endif /* INODE_AVAILABLE */
+               NAMLEN(urlp->d) == 0);
 	urlp->ptr = urlp->d->d_name;
 	urlp->len = NAMLEN(urlp->d);
 #endif

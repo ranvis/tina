@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,13 +15,16 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
 	
     mac_util.c
 */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include 	<stdio.h>
 #include	<stdlib.h>
 #include	<string.h>
@@ -120,6 +123,22 @@ short GetDialogItemValue(DialogPtr dialog, short item )
 	return GetControlValue(itemHandle);
 }
 
+void SetDialogTEValue(DialogRef dialog, short item, int value)
+{
+	Str255		s;
+	
+	NumToString(value, s);
+	mySetDialogItemText(dialog, item, s);
+}
+
+int GetDialogTEValue(DialogRef dialog, short item )
+{
+	Str255		s;
+	
+	myGetDialogItemText(dialog, item, s);
+	return atof(p2cstr(s));
+}
+
 short ToggleDialogItem(DialogPtr dialog, short item )
 {
 	short			itemType, value;
@@ -161,17 +180,18 @@ void SetDialogControlTitle(DialogRef theDialog, short itemNo, const Str255 text)
 	GetDialogItem(theDialog, itemNo, &itemType, &item, &box);
 	SetControlTitle((ControlRef)item, text);
 }
-// ************************************************
-/*void	mac_TransPathSeparater(char str[])
-{
-	int i;
-	for( i=0; str[i]!=0; i++ ){
-		if( str[i]=='/' ){
-			str[i]=':';
-		}
-	}
-}*/
 
+void SetDialogItemHilite(DialogRef dialog, short item, short value)
+{
+	short		itemType;
+	ControlRef	itemHandle;
+	Rect		itemRect;
+	
+	GetDialogItem(dialog, item, &itemType, &itemHandle, &itemRect);
+	HiliteControl(itemHandle, value);
+}
+
+// ************************************************
 void    mac_TransPathSeparater(const char str[], char out[])
 {
 	int i;
@@ -183,6 +203,7 @@ void    mac_TransPathSeparater(const char str[], char out[])
 		}
 	}
 }
+#if 0
 
 char** sys_errlist_()
 {
@@ -195,25 +216,13 @@ char** sys_errlist_()
 	if( errno==ENOSPC )
 		strcpy(s,"Out of Space.");
 	else
-		sprintf(s, "error no.%d", errno);
+		snprintf(s, 80, "error no.%d", errno);
 	
 	return(ret-errno);
 }
-
+#endif /*0*/
 // **************************************************
 #pragma mark -
-
-char* strdup(const char* org)
-{
-	char* newstring;
-	
-	newstring=(char*)malloc(strlen(org)+1);
-	if( newstring==0 ){
-		return 0;
-	}
-	strcpy(newstring, org);
-	return newstring;
-}
 
 /* special fgets */
 /* allow \r as return code */
@@ -229,7 +238,9 @@ char* mac_fgets( char buf[], int n, FILE* file)
 	}
 	
 	buf[i]=0;
-	if( buf[0]==EOF && feof(file) ) return 0;
+	if( i>0 && buf[i-1]==EOF ){ buf[i-1]=0; i--; }
+	
+	if( i==0 && c==EOF && feof(file) ) return 0;
 	
 	
 	if( i==1 && buf[0]=='\n' ){ /* probably dos LF (Unix blank line?)*/

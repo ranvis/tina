@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
@@ -1072,12 +1070,16 @@ static int read_rcp_track(struct timidity_file *tf, int trackno, int gfmt)
 		if(!gfmt)
 		{
 		    jmp = (long)a | ((long)b << 8);
-#if 1
+
 		    if(jmp & 0x03) /* ##?? */
-			continue;
-#else
-		    jmp &= ~3;		/* jmp=(jmp/4)*4 */
-#endif
+		    {
+			/* What do these two bits mean? */
+			/* Clear them here. */
+			ctl->cmsg(CMSG_WARNING, VERB_DEBUG,
+				  "Jump %d is changed to %d",
+				  jmp, jmp & ~3);
+			jmp &= ~3;		/* jmp=(jmp/4)*4 */
+		    }
 		}
 		else
 		{

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 */
 
@@ -59,13 +58,15 @@ SOCKET open_socket(char *host, unsigned short port)
 {
     SOCKET fd;
     struct sockaddr_in in;
-    static int first = 1;
 
+#if defined(WINSOCK)
+    static int first = 1;
     if(first) {
 	WSADATA dmy;
 	WSAStartup(MAKEWORD(1,1), &dmy);
 	first = 0;
     }
+#endif
 
     memset(&in, 0, sizeof(in));
     if((in.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE)
@@ -90,7 +91,7 @@ SOCKET open_socket(char *host, unsigned short port)
     return fd;
 }
 
-#if !defined(__WIN32__) || defined(__CYGWIN32__)
+#if !defined(__W32__) || defined(__CYGWIN32__)
 long socket_write(SOCKET fd, char *buff, long bufsiz)
 {
     return write(fd, buff, bufsiz);
@@ -135,17 +136,17 @@ int socket_fflush(FILE *fp)
 {
     return fflush(fp);
 }
-#else /* __WIN32__ */
+#else /* __W32__ */
 
 #include "url.h"
 
 /* Fake FILE * */
 
-typedef struct _win32_fp_socket_t
+typedef struct _w32_fp_socket_t
 {
     SOCKET fd; /* Now, It has only fd */
-} win32_fp_socket;
-#define WIN32_FP2SOCKET(fp) (((win32_fp_socket *)(fp))->fd)
+} w32_fp_socket;
+#define W32_FP2SOCKET(fp) (((w32_fp_socket *)(fp))->fd)
 
 static long socket_safe_recv(SOCKET fd, char *buff, long bufsiz)
 {
@@ -177,13 +178,13 @@ FILE *socket_fdopen(SOCKET fd, char *mode)
 {
     FILE *fp;
 
-    /* win32_fp_socket fake FILE.
+    /* w32_fp_socket fake FILE.
      * `mode' argument is ignored.
      */
-    if((fp = (FILE *)malloc(sizeof(win32_fp_socket))) == NULL)
+    if((fp = (FILE *)malloc(sizeof(w32_fp_socket))) == NULL)
 	return NULL;
-    memset(fp, 0, sizeof(win32_fp_socket));
-    WIN32_FP2SOCKET(fp) = fd;
+    memset(fp, 0, sizeof(w32_fp_socket));
+    W32_FP2SOCKET(fp) = fd;
     return fp;
 }
 
@@ -200,7 +201,7 @@ static int socket_getc(SOCKET fd)
 
 char *socket_fgets(char *buff, int n, FILE *fp)
 {
-    SOCKET fd = WIN32_FP2SOCKET(fp);
+    SOCKET fd = W32_FP2SOCKET(fp);
     int len;
 
     n--; /* for '\0' */
@@ -228,25 +229,25 @@ char *socket_fgets(char *buff, int n, FILE *fp)
 
 int socket_fgetc(FILE *fp)
 {
-    SOCKET fd = WIN32_FP2SOCKET(fp);
+    SOCKET fd = W32_FP2SOCKET(fp);
     return socket_getc(fd);
 }
 
 long socket_fread(void *buff, long bufsiz, FILE *fp)
 {
-    SOCKET fd = WIN32_FP2SOCKET(fp);
+    SOCKET fd = W32_FP2SOCKET(fp);
     return socket_safe_recv(fd, buff, bufsiz);
 }
 
 long socket_fwrite(void *buff, long bufsiz, FILE *fp)
 {
-    SOCKET fd = WIN32_FP2SOCKET(fp);
+    SOCKET fd = W32_FP2SOCKET(fp);
     return socket_write(fd, buff, bufsiz);
 }
 
 int socket_fclose(FILE *fp)
 {
-    SOCKET fd = WIN32_FP2SOCKET(fp);
+    SOCKET fd = W32_FP2SOCKET(fp);
     int ret;
     ret = closesocket(fd);
     free(fp);

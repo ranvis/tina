@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     smfconv.c - from Aoki Daisuke <dai@y7.net>
 
@@ -47,7 +46,7 @@
 
 */
 
-#ifdef __WIN32__
+#ifdef __W32__
 #include <wtypes.h>
 #include <dir.h>
 #include "rcpcv.h"
@@ -226,7 +225,7 @@ static URL rcpcv_convert(URL url,int type)
 
 /* return 0 (successful or not convert)
           -1 (error and lost tf->url) */
-int smfconv_win32(struct timidity_file *tf, char *fn)
+int smfconv_w32(struct timidity_file *tf, char *fn)
 {
 	URL url;
     int ret;
@@ -303,6 +302,6 @@ last_stage:
 	return 0;
 }
 
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
 #endif /* SMFCONV */

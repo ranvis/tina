@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef HAVE_CONFIG_H
@@ -36,6 +34,8 @@
 #include "instrum.h"
 #include "playmidi.h"
 #include "readmidi.h"
+#include "arc.h"
+#include "interface.h"
 
 /*
  * Remap WRD @COLOR(16)-@COLOR(23) to RGB plain number.
@@ -84,6 +84,7 @@ WRDTracer null_wrdt_mode =
     0,
     null_wrdt_open,
     null_wrdt_apply,
+    NULL,
     null_wrdt_update_events,
     NULL,
     null_wrdt_end,
@@ -96,18 +97,18 @@ extern WRDTracer tty_wrdt_mode;
 extern WRDTracer x_wrdt_mode;
 #endif /* WRDT_X */
 
-#if defined(__WIN32__)
-extern WRDTracer wincon_wrdt_mode; /* wrdt_wincon.c */
-#endif /* __WIN32__ */
+#if defined(__W32__) && !defined(IA_W32GUI)
+extern WRDTracer wcon_wrdt_mode; /* wrdt_wcon.c */
+#endif /* __W32__ */
 
 WRDTracer *wrdt_list[] =
 {
 #ifdef WRDT_X
     &x_wrdt_mode,
 #endif /* WRDT_X */
-#ifdef __WIN32__
-	&wincon_wrdt_mode,
-#endif /* __WIN32__ */
+#if defined(__W32__) && !defined(IA_W32GUI)
+	&wcon_wrdt_mode,
+#endif /* __W32__ */
 #ifndef __MACOS__
     &tty_wrdt_mode,
 #endif /* __MACOS__ */
@@ -124,62 +125,70 @@ WRDTracer *wrdt = &null_wrdt_mode;
 
 static StringTable path_list;
 static StringTable default_path_list;
+static int wrd_add_path_one(char *path, int pathlen);
 
 void wrd_init_path(void)
 {
     StringTableNode *p;
     delete_string_table(&path_list);
     for(p = default_path_list.head; p; p = p->next)
-	wrd_add_path(p->string, 0);
-    if(current_file_info && strchr(current_file_info->filename, '#') != NULL)
-	wrd_add_path(current_file_info->filename,
-		     strchr(current_file_info->filename, '#') -
-		     current_file_info->filename + 1);
-    if(current_file_info &&
-       strrchr(current_file_info->filename, PATH_SEP) != NULL)
-	wrd_add_path(current_file_info->filename,
-		     strrchr(current_file_info->filename, PATH_SEP) -
-		     current_file_info->filename + 1);
+	wrd_add_path_one(p->string, strlen(p->string));
+
+    if(current_file_info)
+    {
+	if(strchr(current_file_info->filename, '#') != NULL)
+	    wrd_add_path_one(current_file_info->filename,
+			     strchr(current_file_info->filename, '#') -
+			     current_file_info->filename + 1);
+	if(pathsep_strrchr(current_file_info->filename) != NULL)
+	    wrd_add_path_one(current_file_info->filename,
+			     pathsep_strrchr(current_file_info->filename) -
+			     current_file_info->filename + 1);
+    }
+}
+
+static int wrd_add_path_one(char *path, int pathlen)
+{
+    int exists;
+    StringTableNode *p;
+
+    exists = 0;
+    for(p = path_list.head; p; p = p->next)
+	if(strncmp(p->string, path, pathlen) == 0 &&
+	   p->string[pathlen] == '\0')
+	{
+	    exists = 1;
+	    break;
+	}
+    if(exists)
+	return 0;
+    put_string_table(&path_list, path, pathlen);
+    return 1;
 }
 
 void wrd_add_path(char *path, int pathlen)
 {
     if(pathlen == 0)
 	pathlen = strlen(path);
-    if(pathlen > 0)
+    if(!wrd_add_path_one(path, pathlen))
+	return;
+
+    if(current_file_info &&
+       get_archive_type(current_file_info->filename) != -1)
     {
-	int exists;
-	StringTableNode *p;
+	MBlockList buf;
+	char *arc_path;
+	int baselen;
 
-	exists = 0;
-	for(p = path_list.head; p; p = p->next)
-	    if(strncmp(p->string, path, pathlen) == 0)
-	    {
-		exists = 1;
-		break;
-	    }
-	if(!exists)
-	{
-	    put_string_table(&path_list, path, pathlen);
-	    if(current_file_info &&
-	       strchr(current_file_info->filename, '#') != NULL &&
-	       path[pathlen - 1] != '#')
-	    {
-		MBlockList buf;
-		char *arc_path;
-		int baselen;
-
-		init_mblock(&buf);
-		baselen = strchr(current_file_info->filename, '#') -
-		    current_file_info->filename + 1;
-		arc_path = new_segment(&buf, baselen + pathlen + 1);
-		strncpy(arc_path, current_file_info->filename, baselen);
-		strncpy(arc_path + baselen, path, pathlen);
-		arc_path[baselen + pathlen] = '\0';
-		put_string_table(&path_list, arc_path, strlen(arc_path));
-		reuse_mblock(&buf);
-	    }
-	}
+	init_mblock(&buf);
+	baselen = strrchr(current_file_info->filename, '#') -
+	    current_file_info->filename + 1;
+	arc_path = new_segment(&buf, baselen + pathlen + 1);
+	strncpy(arc_path, current_file_info->filename, baselen);
+	strncpy(arc_path + baselen, path, pathlen);
+	arc_path[baselen + pathlen] = '\0';
+	put_string_table(&path_list, arc_path, strlen(arc_path));
+	reuse_mblock(&buf);
     }
 }
 
@@ -200,7 +209,7 @@ static struct timidity_file *try_wrd_open_file(char *prefix, char *fn)
     len2 = strlen(fn);
     path = (char *)new_segment(&buf, len1 + len2 + 2);
     strcpy(path, prefix);
-    if( len1>0 && path[len1 - 1] != '#' && path[len1 - 1] != PATH_SEP)
+    if( len1>0 && path[len1 - 1] != '#' && !IS_PATH_SEP(path[len1 - 1]))
     {
 	path[len1++] = PATH_SEP;
 	path[len1] = '\0';
@@ -217,6 +226,10 @@ struct timidity_file *wrd_open_file(char *filename)
 {
     StringTableNode *path;
     struct timidity_file *tf;
+
+    if(get_archive_type(filename) != -1)
+	return open_file(filename, 0, OF_SILENT);
+
     for(path = path_list.head; path; path = path->next){
 	if((tf = try_wrd_open_file(path->string, filename)) != NULL)
 	    return tf;
@@ -244,4 +257,11 @@ void wrd_midi_event(int cmd, int arg)
 	wrdt->apply(cmd, wrd_argc, wrd_args);
 	wrd_argc = 0;
     }
+}
+
+void wrd_sherry_event(int addr)
+{
+    if(!wrdt->opened || wrdt->sherry == NULL)
+	return;
+    wrdt->sherry(datapacket[addr].data, datapacket[addr].len);
 }

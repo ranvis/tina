@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     gtk_i.c - Glenn Trigg 29 Oct 1998
 
@@ -25,7 +24,6 @@
 #include "config.h"
 #endif /* HAVE_CONFIG_H*/
 
-#include <stdio.h>
 #include <string.h>
 #ifdef HAVE_GLOB_H
 #include <glob.h>
@@ -62,7 +60,10 @@ static void handle_input(gpointer, gint, GdkInputCondition);
 static void generic_cb(GtkWidget *, gpointer);
 static void generic_scale_cb(GtkAdjustment *, gpointer);
 static void open_file_cb(GtkWidget *, gpointer);
+static void playlist_cb(GtkWidget *, guint);
+static void playlist_op(GtkWidget *, guint);
 static void file_list_cb(GtkWidget *, gint, gint, GdkEventButton *, gpointer);
+static void clear_all_cb(GtkWidget *, gpointer);
 static void filer_cb(GtkWidget *, gpointer);
 static void tt_toggle_cb(GtkWidget *, gpointer);
 static void locate_update_cb(GtkWidget *, GdkEventButton *, gpointer);
@@ -70,7 +71,7 @@ static void my_adjustment_set_value(GtkAdjustment *, gint);
 static void set_icon_pixmap(GtkWidget *, gchar **);
 
 static GtkWidget *window, *clist, *text, *vol_scale, *locator;
-static GtkWidget *filesel = NULL;
+static GtkWidget *filesel = NULL, *plfilesel = NULL;
 static GtkWidget *tot_lbl, *cnt_lbl, *auto_next, *ttshow;
 static GtkTooltips *ttip;
 static int file_number_to_play; /* Number of the file we're playing in the list */
@@ -78,9 +79,16 @@ static int max_sec, is_quitting = 0, locating = 0, local_adjust = 0;
 
 static GtkItemFactoryEntry ife[] = {
     {"/File/Open", "<control>O", open_file_cb, 0, NULL},
+    {"/File/sep", NULL, NULL, 0, "<Separator>"},
+    {"/File/Load Playlist", "<control>L", playlist_cb,
+     'l', NULL},
+    {"/File/Save Playlist", "<control>S", playlist_cb,
+     's', NULL},
+    {"/File/sep", NULL, NULL, 0, "<Separator>"},
     {"/File/Quit", "<control>Q", generic_cb, GTK_QUIT, NULL},
     {"/Options/Auto next", "<control>A", NULL, 0, "<CheckItem>"},
-    {"/Options/Show tooltips", "<control>T", tt_toggle_cb, 0, "<CheckItem>"}
+    {"/Options/Show tooltips", "<control>T", tt_toggle_cb, 0, "<CheckItem>"},
+    {"/Options/Clear All", "<control>C", clear_all_cb, 0, NULL}
 };
 
 /*----------------------------------------------------------------------*/
@@ -181,7 +189,7 @@ file_list_cb(GtkWidget *widget, gint row, gint column,
 
     if(event && (event->button == 3)) {
 	if(event->type == GDK_2BUTTON_PRESS) {
-	    gtk_clist_remove(clist, row);
+	    gtk_clist_remove(GTK_CLIST(clist), row);
 	}
 	else {
 	    return;
@@ -194,6 +202,102 @@ file_list_cb(GtkWidget *widget, gint row, gint column,
 	file_number_to_play=row;
     }
 }
+
+static void
+playlist_cb(GtkWidget *widget, guint data)
+{
+    gchar	*pldir, *plpatt;
+
+    if( ! plfilesel ) {
+	plfilesel = gtk_file_selection_new("");
+	gtk_file_selection_hide_fileop_buttons(GTK_FILE_SELECTION(plfilesel));
+
+	pldir = g_getenv("TIMIDITY_PLAYLIST_DIR");
+	if(pldir != NULL) {
+	    plpatt = g_strconcat(pldir, "/*.tpl", NULL);
+	    gtk_file_selection_set_filename(GTK_FILE_SELECTION(plfilesel),
+					    plpatt);
+	    g_free(plpatt);
+	}
+
+	gtk_signal_connect(GTK_OBJECT(GTK_FILE_SELECTION(plfilesel)->ok_button),
+			   "clicked",
+			   GTK_SIGNAL_FUNC (playlist_op), (gpointer)1);
+	gtk_signal_connect(GTK_OBJECT(GTK_FILE_SELECTION(plfilesel)->cancel_button),
+			   "clicked",
+			   GTK_SIGNAL_FUNC (playlist_op), NULL);
+    }
+
+    gtk_window_set_title(GTK_WINDOW(plfilesel), ((char)data == 'l')?
+			 "Load Playlist":
+			 "Save Playlist");
+    gtk_object_set_user_data(GTK_OBJECT(plfilesel), (gpointer)data);
+    gtk_file_selection_complete(GTK_FILE_SELECTION(plfilesel), "*.tpl");
+
+    gtk_widget_show(plfilesel);
+} /* playlist_cb */
+
+static void
+playlist_op(GtkWidget *widget, guint data)
+{
+    int		i;
+    gchar	*filename[2], action, *rowdata, fname[BUFSIZ], *tmp;
+    FILE	*plfp;
+
+    gtk_widget_hide(plfilesel);
+
+    if(!data)
+	return;
+
+    action = (gchar)(int)gtk_object_get_user_data(GTK_OBJECT(plfilesel));
+    filename[0] = gtk_file_selection_get_filename(GTK_FILE_SELECTION(plfilesel));
+
+    if(action == 'l') {
+	if((plfp = fopen(filename[0], "r")) == NULL) {
+	    g_error("Can't open %s for reading.", filename[0]);
+	    return;
+	}
+	while(fgets(fname, BUFSIZ, plfp) != NULL) {
+	    if(fname[strlen(fname) - 1] == '\n')
+		fname[strlen(fname) - 1] = '\0';
+	    filename[0] = fname;
+	    filename[1] = NULL;
+	    gtk_clist_append(GTK_CLIST(clist), filename);
+	}
+	fclose(plfp);
+	gtk_clist_columns_autosize(GTK_CLIST(clist));
+    }
+    else if(action == 's') {
+	if((plfp = fopen(filename[0], "w")) == NULL) {
+	    g_error("Can't open %s for writing.", filename[0]);
+	    return;
+	}
+	for(i = 0; i < GTK_CLIST(clist)->rows; i++) {
+	    gtk_clist_get_text(GTK_CLIST(clist), i, 0, &rowdata);
+	    /* Make sure we have an absolute path. */
+	    if(*rowdata != '/') {
+		tmp = g_get_current_dir();
+		rowdata = g_strconcat(tmp, "/", rowdata, NULL);
+		fprintf(plfp, "%s\n", rowdata);
+		g_free(rowdata);
+		g_free(tmp);
+	    }
+	    else {
+		fprintf(plfp, "%s\n", rowdata);
+	    }
+	}
+	fclose(plfp);
+    }
+    else {
+	g_error("Invalid playlist action!.");
+    }
+} /* playlist_op */
+
+static void
+clear_all_cb(GtkWidget *widget, gpointer data)
+{
+    gtk_clist_clear(GTK_CLIST(clist));
+} /* clear_all_cb */
 
 static gint
 delete_event(GtkWidget *widget, GdkEvent *event, gpointer data)
@@ -235,8 +339,11 @@ Launch_Gtk_Process(int pipe_number)
     int	argc = 0;
     GtkWidget *button, *mbar, *swin;
     GtkWidget *table, *align, *handlebox;
-    GtkWidget *vbox, *hbox, *vscrollbar, *vbox2;
+    GtkWidget *vbox, *hbox, *vbox2, *scrolled_win;
     GtkObject *adj;
+
+    /* enable locale */
+    gtk_set_locale ();
 
     gtk_init (&argc, NULL);
 
@@ -258,16 +365,14 @@ Launch_Gtk_Process(int pipe_number)
     mbar = create_menubar();
     gtk_box_pack_start(GTK_BOX(vbox), mbar, FALSE, FALSE, 0);
 
-    hbox = gtk_hbox_new(FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, TRUE, TRUE, 4);
-    gtk_widget_show(hbox);
+    scrolled_win = gtk_scrolled_window_new(NULL, NULL);
+    gtk_box_pack_start(GTK_BOX(vbox), scrolled_win, TRUE, TRUE ,0);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_win),GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
+    gtk_widget_show(scrolled_win);
 
     text = gtk_text_new(NULL, NULL);
     gtk_widget_show(text);
-    gtk_box_pack_start(GTK_BOX(hbox), text, TRUE, TRUE, 4);
-    vscrollbar = gtk_vscrollbar_new(GTK_TEXT(text)->vadj);
-    gtk_box_pack_start(GTK_BOX(hbox), vscrollbar, FALSE, FALSE, 4);
-    gtk_widget_show (vscrollbar);
+    gtk_container_add(GTK_CONTAINER(scrolled_win), text);
 
     hbox = gtk_hbox_new(FALSE, 4);
     gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 4);
@@ -328,7 +433,7 @@ Launch_Gtk_Process(int pipe_number)
     gtk_box_pack_start(GTK_BOX(hbox), swin, TRUE, TRUE, 0);
 
     vbox2 = gtk_vbox_new(FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), vbox2, TRUE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), vbox2, FALSE, FALSE, 0);
     gtk_widget_show(vbox2);
 
     /* This is so the pixmap creation works properly. */
@@ -485,7 +590,6 @@ create_pixmap_label(GtkWidget *window, gchar **bits)
 static void
 set_icon_pixmap(GtkWidget *window, gchar **bits)
 {
-    GtkWidget	*pw;
     GdkPixmap	*pixmap;
     GdkBitmap	*mask;
     GtkStyle	*style;
@@ -556,7 +660,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
     switch (message) {
     case REFRESH_MESSAGE:
-	printf("REFRESH MESSAGE IS OBSOLETE !!!\n");
+	g_warning("REFRESH MESSAGE IS OBSOLETE !!!");
 	break;
 
     case TOTALTIME_MESSAGE:
@@ -599,7 +703,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
     case FILENAME_MESSAGE:
 	{
-	    char filename[255], separator[255], title[255];
+	    char filename[255], title[255];
 	    char *pc;
 	    int i;
 
@@ -615,12 +719,12 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 	    sprintf(title, "Timidity %s - %s", timidity_version, pc);
 	    gtk_window_set_title(GTK_WINDOW(window), title);
 
-	    for (i = 0; i < 30; i++)
-		separator[i]='*';
-	    separator[i++]='\n';
-	    separator[i]='\0';
-	    gtk_text_insert(GTK_TEXT(text), NULL, NULL, NULL,
-			    separator, -1);
+	    /* Clear the text area. */
+	    gtk_text_freeze(GTK_TEXT(text));
+	    gtk_text_set_point(GTK_TEXT(text), 0);
+	    gtk_text_forward_delete(GTK_TEXT(text),
+				    gtk_text_get_length(GTK_TEXT(text)));
+	    gtk_text_thaw(GTK_TEXT(text));
 	}
 	break;
 
@@ -720,7 +824,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&note);
-	    printf("NOTE chn%i %i\n",channel,note);
+	    g_warning("NOTE chn%i %i", channel, note);
 	}
 	break;
 
@@ -731,7 +835,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&pgm);
-	    printf("NOTE chn%i %i\n",channel,pgm);
+	    g_warning("NOTE chn%i %i", channel, pgm);
 	}
 	break;
 
@@ -742,7 +846,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&volume);
-	    printf("VOLUME= chn%i %i \n",channel, volume);
+	    g_warning("VOLUME= chn%i %i", channel, volume);
 	}
 	break;
 
@@ -754,7 +858,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&express);
-	    printf("EXPRESSION= chn%i %i \n",channel, express);
+	    g_warning("EXPRESSION= chn%i %i", channel, express);
 	}
 	break;
 
@@ -765,7 +869,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&pan);
-	    printf("PANNING= chn%i %i \n",channel, pan);
+	    g_warning("PANNING= chn%i %i", channel, pan);
 	}
 	break;
 
@@ -776,7 +880,7 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&sust);
-	    printf("SUSTAIN= chn%i %i \n",channel, sust);
+	    g_warning("SUSTAIN= chn%i %i", channel, sust);
 	}
 	break;
 
@@ -787,12 +891,12 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 
 	    gtk_pipe_int_read(&channel);
 	    gtk_pipe_int_read(&bend);
-	    printf("PITCH BEND= chn%i %i \n",channel, bend);
+	    g_warning("PITCH BEND= chn%i %i", channel, bend);
 	}
 	break;
 
     case RESET_MESSAGE:
-	printf("RESET_MESSAGE\n");
+	g_warning("RESET_MESSAGE");
 	break;
 
     case CLOSE_MESSAGE:
@@ -812,7 +916,17 @@ handle_input(gpointer client_data, gint source, GdkInputCondition ic)
 			    "\n", 1);
 	}
 	break;
+    case LYRIC_MESSAGE:
+	{
+	    char message[1000];
+
+	    gtk_pipe_string_read(message);
+
+	    gtk_text_insert(GTK_TEXT(text), NULL, NULL, NULL,
+			    message, -1);
+	}
+	break;
     default:
-	fprintf(stderr,"UNKNOWN Gtk+ MESSAGE %i\n",message);
+	g_warning("UNKNOWN Gtk+ MESSAGE %i", message);
     }
 }

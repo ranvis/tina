@@ -1,9 +1,6 @@
-#ifndef ___TABLES_H_
-#define ___TABLES_H_
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -18,10 +15,13 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     tables.h
 */
+
+#ifndef ___TABLES_H_
+#define ___TABLES_H_
 
 #ifdef LOOKUP_SINE
 extern FLOAT_T lookup_sine(int x);
@@ -32,10 +32,13 @@ extern FLOAT_T lookup_sine(int x);
 
 #define SINE_CYCLE_LENGTH 1024
 extern int32 freq_table[];
-extern FLOAT_T vol_table[];
+extern FLOAT_T *vol_table;
+extern FLOAT_T def_vol_table[];
+extern FLOAT_T gs_vol_table[];
+extern FLOAT_T *xg_vol_table; /* == gs_vol_table */
 extern FLOAT_T bend_fine[];
 extern FLOAT_T bend_coarse[];
-extern FLOAT_T midi_time_table[];
+extern FLOAT_T midi_time_table[], midi_time_table2[];
 #ifdef LOOKUP_HACK
 extern uint8 *_l2u; /* 13-bit PCM to 8-bit u-law */
 extern uint8 _l2u_[]; /* used in LOOKUP_HACK */
@@ -45,6 +48,17 @@ extern int32 *mixup;
 extern int8 *iplookup;
 #endif
 #endif
+extern uint8 reverb_macro_presets[];
+extern uint8 chorus_macro_presets[];
+extern uint8 delay_macro_presets[];
+extern FLOAT_T delay_time_center_table[];
+extern FLOAT_T pre_delay_time_table[];
+extern uint8 velocity_table[];
+extern int opt_velocity_table;
+extern FLOAT_T linear_vol_table[];
+extern FLOAT_T log_vol_table[];
+extern FLOAT_T *attack_vol_table;
+
 
 extern void init_tables(void);
 

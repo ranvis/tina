@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     support.c - Define missing function
                 Written by Masanao Izumo <mo@goice.co.jp>
@@ -33,24 +32,31 @@
 #include <unistd.h>
 #endif /* HAVE_UNISTD_H */
 #include <stdarg.h>
+#ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
+#endif /* HAVE_SYS_TIME_H */
+#ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
+#endif /* HAVE_SYS_TYPES_H */
 #ifndef NO_STRING_H
 #include <string.h>
 #else
 #include <strings.h>
 #endif
-#ifdef __WIN32__
+#ifdef __W32__
 #include <windows.h>
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
 #ifdef HAVE_SYS_PARAM_H
 #include <sys/param.h>
 #endif /* HAVE_SYS_PARAM_H */
+#include <ctype.h>
 
 #include "timidity.h"
 #include "mblock.h"
-
+#ifdef __MACOS__
+#include <Threads.h>
+#endif
 
 #ifndef HAVE_VSNPRINTF
 /* From glib-1.1.13:gstrfuncs.c
@@ -740,22 +746,30 @@ char *strerror(int errnum)
 #endif /* HAVE_ERRNO_H */
 #endif /* HAVE_STRERROR */
 
-
 #ifndef HAVE_USLEEP
+#ifdef __W32__
 int usleep(unsigned int usec)
 {
-#if defined(HAVE_SELECT)
+    Sleep(usec / 1000);
+    return 0;
+}
+#elif __MACOS__
+int usleep(unsigned int /*usec*/)
+{
+    YieldToAnyThread();
+    return 0;
+}
+#else
+int usleep(unsigned int usec)
+{
     struct timeval tv;
     tv.tv_sec  = usec / 1000000;
     tv.tv_usec = usec % 1000000;
     select(0, NULL, NULL, NULL, &tv);
-#elif defined(__WIN32__)
-    Sleep(usec / 1000);
-#endif /* HAVE_SELECT */
     return 0;
 }
+#endif /* __W32__ */
 #endif /* HAVE_USLEEP */
-
 
 #ifndef HAVE_STRDUP
 char *strdup(const char *s)

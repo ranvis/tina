@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 */
 
@@ -63,6 +62,11 @@
 #include "output.h"
 #include "controls.h"
 #include "miditrace.h"
+#include "aq.h"
+
+#ifndef TKPROGPATH
+#define TKPROGPATH PKGLIBDIR "/tkmidity.tcl"
+#endif /* TKPROGPATH */
 
 
 static void ctl_refresh(void);
@@ -143,6 +147,7 @@ ControlMode ctl=
 {
     "Tcl/Tk interface", 'k',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     ctl_pass_playing_list,
@@ -424,8 +429,6 @@ static void ctl_reset(void)
 	    return;
 	}
 
-	play_mode->purge_output();
-	trace_flush();
 	Panel->wait_reset = 1;
 	k_pipe_printf("RSET %d", ctl.trace_playing);
 
@@ -820,10 +823,8 @@ static void shm_free(int sig)
 	int status;
 #if defined(HAVE_UNION_SEMUN)
 	union semun dmy;
-#elif defined(SOLARIS) || defined(bsdi) || defined(DEC) || defined(HPUX)
+#else /* Solaris 2.x, BSDI, OSF/1, HPUX */
 	void *dmy;
-#else
-	union semun dmy;
 #endif
 
 	kill(child_pid, SIGTERM);

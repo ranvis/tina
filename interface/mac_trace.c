@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -25,6 +25,9 @@
 */
 
 // includs
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include "string.h"
 #include "timidity.h"
 #include "common.h"
@@ -35,6 +38,7 @@
 #include "miditrace.h"
 #include "bitset.h"
 #include "mfnode.h"
+//#include "aq.h"
 
 #include "mac_main.h"
 #include "mac_util.h"
@@ -83,7 +87,7 @@ static void DrawInstrumentName(int ch, char *comm)
 	
 		//channel number
 	MoveTo(2, UPPER_MERGIN+CHANNEL_HIGHT*(ch+1)-1);
-	sprintf(buf, "%2d", ch+1);
+	snprintf(buf, 80,"%2d", ch+1);
 	DrawText(buf, 0, strlen(buf));
 		
 		//InstrumentName
@@ -104,6 +108,7 @@ static void mac_ctl_refresh_trc()
 	RGBColor	black={0,0,0},
 				darkGray={0x2000,0x2000,0x2000};
 
+	if( !win.show ) return;
 	SetPortWindowPort(win.ref);
 	for( i=0; i<16; i++ ){
 		DrawInstrumentName(i, instr_comment[i].comm);
@@ -156,8 +161,8 @@ void mac_ctl_program(int ch, int val, void *comm)
     if(!ctl->trace_playing)
 	return;
 
-    if(channel[ch].special_sample)
-		pr = val = channel[ch].special_sample;
+    if(IS_CURRENT_MOD_FILE)
+		pr = val;
     else
 		pr = val + progbase;
 
@@ -204,7 +209,7 @@ static void update_filename()
 	
 	if( mac_n_files>0 && nPlaying<=mac_n_files && fileList[nPlaying].mfn &&
 										fileList[nPlaying].mfn->file )
-		sprintf(buf, "File: %s", fileList[nPlaying].mfn->file);
+		snprintf(buf, 256,"File: %s", fileList[nPlaying].mfn->file);
 	RGBForeColor(&black);
 	MoveTo(2,12); DrawText(buf, 0, strlen(buf));
 }
@@ -217,27 +222,31 @@ static void update_title()
 	SetPortWindowPort(win.ref);
 	if( mac_n_files>0 && nPlaying<=mac_n_files && fileList[nPlaying].mfn &&
 										fileList[nPlaying].mfn->title )
-		sprintf(buf, "Title: %s", fileList[nPlaying].mfn->title);
+		snprintf(buf, 256, "Title: %s", fileList[nPlaying].mfn->title);
 	RGBForeColor(&black);
 	MoveTo(2,24); DrawText(buf, 0, strlen(buf));
 }
 
-void mac_trc_update_time( int tot_secs)
+void mac_trc_update_time( int cur_sec, int tot_sec )
 {
-	static int	save_tot_secs=0;
-	int			secs;
+	static int	save_tot_sec=0, save_cur_sec;
+	//int rate;
 	char		buf[80];
 	
+	if( cur_sec!=-1 ) save_cur_sec=tot_sec;
+	if( tot_sec!=-1 ) save_tot_sec=tot_sec;
+	if( cur_sec==-1 ) cur_sec=0;
+	if( cur_sec > save_tot_sec ) cur_sec=save_tot_sec;
+	
+	if( !win.show ) return;
+	//rate = (int)(aq_filled_ratio() * 100 + 0.5);
+
 	SetPortWindowPort(win.ref);
-	if( tot_secs!=-1 ) save_tot_secs=tot_secs;
-	secs= play_mode->current_samples()/play_mode->rate;
-	if( secs > save_tot_secs ) secs=save_tot_secs;
-	sprintf(buf, " %3d:%02d /%3d:%02d   buffering=%d sec    ",
-			secs/60, secs%60, save_tot_secs/60,save_tot_secs%60,
-			(play_mode->extra_param[0]- play_mode->current_samples())
-						  /play_mode->rate );
+	snprintf(buf, 80," %3d:%02d /%3d:%02d   " /*"buffering=%3d %% "*/ "buffer %d/256  ",
+		cur_sec/60, cur_sec%60, save_tot_sec/60,save_tot_sec%60,
+		/*rate,*/ mac_buf_using_num );
 	RGBForeColor(&black);
-	MoveTo(450,12); DrawText(buf, 0, strlen(buf));
+	MoveTo(400,12); DrawText(buf, 0, strlen(buf));
 }
 
 void mac_trc_update_voices()
@@ -248,7 +257,7 @@ void mac_trc_update_voices()
 	if( !mac_TraceWindow.show ) return;
 	SetPortWindowPort(win.ref);
 	
-	sprintf(buf, "Voice %3d/%3d   ", current_voices, voices);
+	snprintf(buf, 20, "Voice %3d/%3d   ", current_voices, voices);
 	RGBForeColor(&black);
 	MoveTo(450,24); DrawText(buf, 0, strlen(buf));
 }
@@ -264,7 +273,7 @@ void mac_trc_update_all_info()
 	mac_trc_update_voices();
 	update_filename();
 	update_title();
-	mac_trc_update_time(-1);
+	mac_trc_update_time(-1,-1);
 }
 // *****************************************************
 #pragma mark -
@@ -336,11 +345,12 @@ static unsigned int UpdateNote(int status, int ch, int note, int vel)
 	//int	vel;
 	Rect r1,r2;
     unsigned int onoff=0 /*, check, prev_check*/;
-	const RGBColor dieColor=	{0x3000,0x3000,0x3000},	//dark gray
+	const RGBColor	dieColor=	{0x3000,0x3000,0x3000},	//dark gray
 					freeColor=	{0x3000,0x3000,0x3000},	//dark gray
-					onColor=	{0xffff,0xffff,0}, 		//yellow
+			onColor=	{0xffff,0xffff,0}, 	//yellow
 					sustainedColor={0x8000,0x8000,0},	//dark yellow
-					offColor=	{0x4000,0x4000,0};		//dark yellow
+			offColor=	{0x4000,0x4000,0},	//dark yellow
+			noColor=	{0x2000,0x2000,0x2000};
 	RGBColor	color;
 	
 	vel=(10 * vel) / 128; /* 0-9 */
@@ -362,7 +372,8 @@ static unsigned int UpdateNote(int status, int ch, int note, int vel)
 	case VOICE_FREE: color=freeColor; onoff = 0;	break;
 	case VOICE_SUSTAINED:DARKEN2(color); onoff = 1;	break;
 	case VOICE_OFF:	DARKEN4(color); onoff = 1;		break;
-	case VOICE_ON:					onoff = 1;		break;
+	case VOICE_ON:			onoff = 1;		break;
+	default:	color= noColor; break;
     }
     RGBForeColor(&freeColor);
     PaintRect(&r1);    

@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
@@ -23,12 +23,16 @@
     mac_main.c
 */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif /* HAVE_CONFIG_H */
 #include	<Sound.h>
 #include	<stdio.h>
 #include	<stdlib.h>
 #include	<string.h>
 #include	<Threads.h>
 #include	<unix.mac.h>
+#include	"OMS.h"
 
 #include	"timidity.h"
 #include	"common.h"
@@ -42,9 +46,13 @@
 #ifdef SUPPORT_SOUNDSPEC
 #include "soundspec.h"
 #endif /* SUPPORT_SOUNDSPEC */
+#include "recache.h"
+#include "miditrace.h"
+#include "aq.h"
 
 #include	"mac_main.h"
 #include	"mac_c.h"
+#include	"mac_oms.h"
 #include	"mac_util.h"
 
 #define MAIN_INTERFACE  /* non-static */
@@ -54,8 +62,11 @@ MAIN_INTERFACE int	timidity_post_load_configuration(void);
 MAIN_INTERFACE void	timidity_init_player(void);
 MAIN_INTERFACE int	timidity_play_main(int nfiles, char **files);
 MAIN_INTERFACE int	read_config_file(char *name, int self);
+MAIN_INTERFACE void	timidity_init_aq_buff(void);
 
+extern char *wrdt_open_opts;
 char *timidity_version = TIMID_VERSION;
+
 Boolean	skin_f_repeat, gQuit, gBusy, gShuffle;
 int		mac_rc, skin_state=WAITING, mac_n_files, nPlaying;
 long	gStartTick;
@@ -173,9 +184,9 @@ static void mac_init()
 	InitMenuBar();
 }
 
+extern char *opt_aq_max_buff,*opt_aq_fill_buff;
 int  main()
 {
-	EventRecord	event;
 	int32	output_rate=DEFAULT_RATE;
 	int		err;
 	
@@ -185,47 +196,35 @@ int  main()
 	
 	mac_DefaultOption();
 	mac_GetPreference();
-	
+
+#ifdef MAC_INITIAL_FILLING
+	if(!opt_aq_max_buff)
+		opt_aq_max_buff = safe_strdup("0.0");
+	if(!opt_aq_fill_buff)
+		opt_aq_fill_buff = safe_strdup("100%");
+#endif
 	
 	timidity_start_initialize();
-    if((err = timidity_pre_load_configuration()) != 0)
+	if((err = timidity_pre_load_configuration()) != 0)
 		return err;
-    err += timidity_post_load_configuration();
-    if( err )
-    {
+	err += timidity_post_load_configuration();
+	if( err )
+	{
 		//ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
 		//	  "Try %s -h for help", program_name);
 		return 1; /* problems with command line */
-    }
-    timidity_init_player();
-	ctl->open(0, 0);
-	play_mode->open_output();
-	init_load_soundfont();
-	wrdt=wrdt_list[0];  //dirty!!
-	if(wrdt->open("d"))
-	{	//some errors
-		fprintf(stderr, "Couldn't open WRD Tracer: %s (`%c')" NLS,
-			wrdt->name, wrdt->id);
-		play_mode->close_output();
-		ctl->close();
-		return 1;
 	}
-	//amplification=20;
-
-	gQuit=false;
-	while(!gQuit)
-	{
-		WaitNextEvent(everyEvent, &event, 1,0);
-		mac_HandleEvent(&event);
-	}	
-	DoQuit();
+	
+	timidity_init_player();
+	wrdt=wrdt_list[0];  //dirty!!
+	wrdt_open_opts= "m";
+	timidity_play_main(0, NULL);
+	 	//CPU won't return from timidity_play_main
 	return 0;
 }
 
 static pascal void* StartPlay(void *)
 {
-	//OSErr	err;
-	SndCommand		theCmd;
 	int		rc;
 		
 	//for( i=0; i<nfiles; i++)
@@ -236,9 +235,10 @@ static pascal void* StartPlay(void *)
 		DisableItem(GetMenu(mFile), iPref & 0x0000FFFF);
 			rc=play_midi_file( fileList[nPlaying].filename );
 			gStartTick=0;
-			theCmd.cmd=waitCmd;
-			theCmd.param1=2000*gSilentSec;
-			SndDoCommand(gSndCannel, &theCmd, 1);
+			gBusy=true;
+			//theCmd.cmd=waitCmd;
+			//theCmd.param1=2000*gSilentSec;
+			//SndDoCommand(gSndCannel, &theCmd, 1);
 		EnableItem(GetMenu(mFile), iSaveAs & 0x0000FFFF);
 		EnableItem(GetMenu(mFile), iPref & 0x0000FFFF);
 		skin_state=(rc==RC_QUIT? STOP:WAITING);
@@ -269,6 +269,10 @@ static void HandleNullEvent()
 		NewThread(kCooperativeThread, StartPlay,
 		         0, 0, kCreateIfNeeded, 0, 0);
 	}
+	
+#ifdef MAC_USE_OMS
+	mac_oms_doevent();
+#endif
 }
 
 void mac_HandleEvent(EventRecord *event)
@@ -284,7 +288,7 @@ void mac_HandleEvent(EventRecord *event)
 	case keyDown:
 		if( event->modifiers&cmdKey )
 		{
-			mac_HandleMenuSelect(MenuKey(event->message&charCodeMask));
+			mac_HandleMenuSelect(MenuKey(event->message&charCodeMask), event->modifiers);
 			HiliteMenu(0);
 			break;
 		}else{ //no command key
@@ -314,7 +318,7 @@ void mac_HandleControl()
 	case RC_QUIT:
 			if( skin_state==PAUSE )
 			{
-				play_mode->purge_output();
+				play_mode->acntl(PM_REQ_DISCARD,0);
 				theCmd.cmd=resumeCmd; SndDoImmediate(gSndCannel, &theCmd);
 				skin_state=PLAYING;
 			}
@@ -338,8 +342,8 @@ void mac_HandleControl()
 		else if( skin_state==PAUSE ){ mac_rc=RC_CONTINUE; mac_HandleControl(); }
 		break;			/*and wait ctl_read*/
 	case RC_TOGGLE_PAUSE:
-		if( skin_state==PAUSE ){ mac_rc=RC_CONTINUE; mac_HandleControl(); }
-		else if( skin_state==PLAYING ){ mac_rc=RC_PAUSE; mac_HandleControl(); }
+		if( skin_state==PAUSE ){ theCmd.cmd=resumeCmd; SndDoImmediate(gSndCannel, &theCmd); skin_state=PLAYING;}
+		else if( skin_state==PLAYING ){theCmd.cmd=pauseCmd; SndDoImmediate(gSndCannel, &theCmd); skin_state=PAUSE;}
 		break;
 	case RC_RESTART:
 		break;			/*and wait ctl_read*/
@@ -348,13 +352,13 @@ void mac_HandleControl()
 			{ mac_rc=RC_CONTINUE; mac_HandleControl(); mac_rc=RC_LOAD_FILE;}
 		skin_state=WAITING;
 		break;
-	case RC_PAUSE:
+	/*case RC_PAUSE:
 		if( skin_state==PLAYING ){theCmd.cmd=pauseCmd; SndDoImmediate(gSndCannel, &theCmd); skin_state=PAUSE;}
-		break;
-	case RC_CONTINUE:
+		break;*/
+	/*case RC_CONTINUE:
 		if( skin_state==PAUSE ){ theCmd.cmd=resumeCmd; SndDoImmediate(gSndCannel, &theCmd); skin_state=PLAYING;}
 		else if( skin_state==STOP ){ skin_state=WAITING; mac_rc=0; }
-		break;
+		break;*/
 	case RC_REALLY_PREVIOUS:
 		break;			/*and wait ctl_read*/
 	}
@@ -367,8 +371,9 @@ void mac_HandleControl()
 
 extern PlayMode wave_play_mode;
 extern PlayMode aiff_play_mode;
-extern PlayMode mac_quicktime_play_mode;
 extern PlayMode mac_play_mode;
+extern PlayMode mac_quicktime_play_mode;
+extern PlayMode mac_oms_play_mode;
 
 static pascal void* ConvertToAiffFile(void*)
 {
@@ -387,6 +392,7 @@ static pascal void* ConvertToAiffFile(void*)
 	{
 		play_mode=&aiff_play_mode;
 			if( play_mode->open_output()==-1 ) return 0;
+			aq_setup();
 			tmp=skin_state;
 			skin_state=PLAYING;
 			err=GetFullPath( &stdReply.sfFile, fullPath);
@@ -395,6 +401,8 @@ static pascal void* ConvertToAiffFile(void*)
 			skin_state=tmp;
 			play_mode->close_output();
 		play_mode=&mac_play_mode;
+		aq_setup();
+		timidity_init_aq_buff();
 		p2cstrcpy(newfile, stdReply.sfFile.name); strcat(newfile,".aiff");
 		rename("output.aiff", newfile);
 	}
@@ -411,7 +419,18 @@ static void mac_AboutBox()
 	dialog=GetNewDialog(200,0,(WindowRef)-1);
 	if( dialog==0 ) return;
 	SetDialogDefaultItem(dialog, 1);
-	ParamText(TIMID_VERSION_PASCAL, "\p", "\p", "\p");
+	
+#ifdef __POWERPC__
+ #define TIMID_CPU "PPC"
+#elif __MC68K__
+ #if  __MC68881__
+  #define TIMID_CPU "68k+FPU"
+ #else
+  #define TIMID_CPU "68k"
+ #endif
+#endif
+
+	ParamText("\p" TIMID_VERSION TIMID_CPU, "\p", "\p", "\p");
 	
 	ShowWindow(dialog);
 	for(;;){
@@ -438,7 +457,7 @@ static void CloseFrontWindow()
 	macwin->goaway(macwin);
 }
 
-void mac_HandleMenuSelect(long select)
+void mac_HandleMenuSelect(long select, short modifiers)
 {
 	StandardFileReply	stdReply;
 	Str255	str;
@@ -494,15 +513,16 @@ void mac_HandleMenuSelect(long select)
 		//Synth menu
 	case iTiMidity:{
 		MenuHandle menu=GetMenu(mSynth);
-		CheckItem(menu, iTiMidity, 1);
-		CheckItem(menu, iQuickTime, 0);
+		CheckItem(menu, iTiMidity & 0x0000FFFF, 1);
+		CheckItem(menu, iQuickTime & 0x0000FFFF, 0);
+		CheckItem(menu, iOMS & 0x0000FFFF, 0);
 		play_mode=&mac_play_mode;
 		}
 		return;
 	case iQuickTime:{
 		MenuHandle menu=GetMenu(mSynth);
 		
-		if( ! mac_quicktime_play_mode.fd ){ //not opened yet
+		if( mac_quicktime_play_mode.fd==-1 ){ //not opened yet
 			if( mac_quicktime_play_mode.open_output()!=0 ){
 				SysBeep(0);
 				return;	//can't open device
@@ -510,7 +530,23 @@ void mac_HandleMenuSelect(long select)
 		}
 		CheckItem(menu, iTiMidity & 0x0000FFFF, 0);
 		CheckItem(menu, iQuickTime & 0x0000FFFF, 1);
+		CheckItem(menu, iOMS & 0x0000FFFF, 0);
 		play_mode=&mac_quicktime_play_mode;
+		}
+		return;
+	case iOMS:{
+		MenuHandle menu=GetMenu(mSynth);
+		
+		if( mac_oms_play_mode.fd==-1 || (modifiers & optionKey) ){
+			if( mac_oms_play_mode.open_output()!=0 ){
+				SysBeep(0);
+				return;	//can't open device
+			}
+		}
+		CheckItem(menu, iTiMidity & 0x0000FFFF, 0);
+		CheckItem(menu, iQuickTime & 0x0000FFFF, 0);
+		CheckItem(menu, iOMS & 0x0000FFFF, 1);
+		play_mode=&mac_oms_play_mode;
 		}
 		return;
 	}
@@ -524,9 +560,21 @@ void mac_HandleMenuSelect(long select)
 
 void DoQuit()
 {
-	play_mode->close_output();
-	ctl->close();
+	if( mac_play_mode.fd!=-1 )
+		mac_play_mode.close_output();
+	if( mac_quicktime_play_mode.fd!=-1 )
+		mac_quicktime_play_mode.close_output();
+	if( mac_oms_play_mode.fd!=-1 )
+		mac_oms_play_mode.close_output();
+	if( ctl )
+		ctl->close();
+		
 	mac_SetPreference();
+	
+#ifdef MAC_USE_OMS
+	mac_oms_quit();
+#endif
+
 	ExitToShell();
 }
 
@@ -581,8 +629,10 @@ static int isArchiveFilename(const char *fn)
 	char	*p;
 	
 	p= strrchr(fn, '.'); if( p==0 ) return 0;
-	if( strcasecmp(p, ".lzh")==0 ||
-		strcasecmp(p, ".zip")==0
+	if(	strcasecmp(p, ".lzh")==0 ||
+		strcasecmp(p, ".zip")==0 ||
+		strcasecmp(p, ".tar")==0 ||
+		strcasecmp(p, ".gz")==0
 		){
 		return 1;
 	}else{
@@ -601,53 +651,6 @@ static int isBMPFilename(const char *fn)
 		return 0;
 	}
 }
-
-/*int isMidiFile(const FSSpec *spec)
-{
-	int len;
-
-	//err= FSpGetFInfo(spec, &fndrInfo);
-	len=spec->name[0];	//strlen
-	if( memcmp( &spec->name[len-3], ".mid", 4)==0 ||
-		memcmp( &spec->name[len-3], ".MID", 4)==0 ||
-		memcmp( &spec->name[len-3], ".rcp", 4)==0 ||
-		memcmp( &spec->name[len-3], ".RCP", 4)==0 ||
-		memcmp( &spec->name[len-3], ".R36", 4)==0 ||
-		memcmp( &spec->name[len-3], ".r36", 4)==0 ||
-		memcmp( &spec->name[len-3], ".G18", 4)==0 ||		
-		memcmp( &spec->name[len-3], ".g18", 4)==0 ||
-		memcmp( &spec->name[len-3], ".G36", 4)==0 ||
-		memcmp( &spec->name[len-3], ".g36", 4)==0 ||
-		memcmp( &spec->name[len-2], ".gz",  3)==0 ||
-		memcmp( &spec->name[len-3], ".mod", 4)==0 ||
-		memcmp( &spec->name[len-3], ".hqx", 4)==0 ||
-		memcmp( &spec->name[len-4], ".mime", 5)==0
-		){
-		return 1;
-	}
-	else{
-		return 0;
-	}
-}*/
-
-/*int isArchiveFile(const FSSpec *spec)
-{
-	int len;
-
-	len=spec->name[0];	//strlen
-	if( memcmp( &spec->name[len-3], ".lzh", 4)==0 ||
-		memcmp( &spec->name[len-3], ".LZH", 4)==0 ||
-		memcmp( &spec->name[len-3], ".zip", 4)==0 ||
-		memcmp( &spec->name[len-3], ".ZIP", 4)==0
-		//memcmp( &spec->name[len-3], ".hqx", 4)==0 ||
-		//memcmp( &spec->name[len-4], ".mime", 5)==0		
-		){
-		return 1;
-	}
-	else{
-		return 0;
-	}
-}*/
 
 static void AddFolderFSSpec2PlayList(const FSSpec *spec)
 {

@@ -1,9 +1,6 @@
-#ifndef ___MIX_H_
-#define ___MIX_H_
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     In case you haven't heard, this program is free software;
@@ -19,14 +16,18 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     mix.h
 
 */
 
+#ifndef ___MIX_H_
+#define ___MIX_H_
+
 extern void mix_voice(int32 *buf, int v, int32 c);
 extern int recompute_envelope(int v);
 extern int apply_envelope_to_amp(int v);
+extern int min_sustain_time;  /* time (ms) for full vol note to sustain */
 
 #endif /* ___MIX_H_ */

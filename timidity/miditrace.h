@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,8 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifndef ___MIDITRACE_H_
@@ -25,7 +23,6 @@
 
 typedef struct _MidiTrace
 {
-    int nodelay;	/* True if run immediately */
     int offset;		/* sample offset */
     int flush_flag;	/* True while in trace_flush() */
 
@@ -54,6 +51,7 @@ extern void trace_offset(int offset);
 extern void trace_nodelay(int nodelay);
 extern void set_trace_loop_hook(void (* f)(void));
 extern int32 current_trace_samples(void);
+extern int32 trace_wait_samples(void);
 
 extern MidiTrace midi_trace;
 

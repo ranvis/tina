@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     xskin.h
 
@@ -29,10 +28,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef __MACOS__
 #include <sys/time.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
+#endif /* __MACOS__ */
 
 #ifndef NO_STRING_H
 #include <string.h>
@@ -40,11 +41,12 @@
 #include <strings.h>
 #endif /* NO_STRING_H */
 
+#ifndef __MACOS__
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-
+#endif /* __MACOS__ */
 
 #define XSKIN_WINDOW_NAME "Timidity"
 #define XSKIN_RES_CLASS   "timidity"
@@ -150,8 +152,8 @@ extern void ts_spectrum( int, unsigned char * );
 #define BITRATE_Y        43
 #define SAMPLE_X         156
 #define SAMPLE_Y         43
-#define MESSAGE_X        110
-#define MESSAGE_Y        24
+#define MESSAGE_X        112
+#define MESSAGE_Y        27
 
 /* numbers */
 

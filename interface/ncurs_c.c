@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     nncurs_c.c: written by Masanao Izumo <mo@goice.co.jp>
                       and Aoki Daisuke <dai@y7.net>.
@@ -30,8 +29,14 @@
 
 #if defined(__MINGW32__) && defined(USE_PDCURSES)
 #define _NO_OLDNAMES 1	/* avoid type mismatch of beep() */
-#endif /* USE_PDCURSES */
+#ifndef sleep
+extern void sleep(unsigned long);
+#endif /* sleep */
 #include <stdlib.h>
+#undef _NO_OLDNAMES
+#else /* USE_PDCURSES */
+#include <stdlib.h>
+#endif
 
 #include <stdarg.h>
 #include <ctype.h>
@@ -42,9 +47,13 @@
 #endif
 #include <math.h>
 
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif
+#endif /* HAVE_UNISTD_H */
+
+#ifdef __W32__
+#include <windows.h>
+#endif /* __W32__ */
 
 #ifdef HAVE_NCURSES_H
 #include <ncurses.h>
@@ -65,11 +74,20 @@
 #include "timer.h"
 #include "bitset.h"
 #include "arc.h"
+#include "aq.h"
+
+#ifdef USE_PDCURSES
+int PDC_set_ctrl_break(bool setting);
+#endif /* USE_PDCURSES */
 
 #define SCREEN_BUGFIX 1 /* FIX the old ncurses bug */
 
 /* Define WREFRESH_CACHED if wrefresh isn't clear the internal cache */
-#define WREFRESH_CACHED
+#define WREFRESH_CACHED 1
+
+#ifdef JAPANESE
+#define MULTIBUTE_CHAR_BUGFIX 1 /* Define to fix multibute overwrite bug */
+#endif /* JAPANESE */
 
 #define MIDI_TITLE
 #define DISPLAY_MID_MODE
@@ -79,8 +97,8 @@
 #define CHECK_NOTE_SLEEP_TIME 5.0
 #define NCURS_MIN_LINES 8
 
+#define CTL_STATUS_UPDATE -98
 #define CTL_STATUS_INIT -99
-#define CTL_LAST_STATUS -1
 
 #ifndef MIDI_TITLE
 #undef DISPLAY_MID_MODE
@@ -96,15 +114,27 @@
 
 #define MAX_U_PREFIX 256
 
+/* GS LCD */
+#define GS_LCD_MARK_ON		-1
+#define GS_LCD_MARK_OFF		-2
+#define GS_LCD_MARK_CLEAR	-3
+#define GS_LCD_MARK_CHAR '$'
+static double gslcd_last_display_time;
+static int gslcd_displayed_flag = 0;
+#define GS_LCD_CLEAR_TIME 10.0
+#define GS_LCD_WIDTH 40
+
 extern int set_extension_modes(char *flag);
 
 static struct
 {
-    int prog;
-    int disp_cnt;
+    int bank, bank_lsb, bank_msb, prog, vol, exp, pan, sus, pitch, wheel;
+    int is_drum;
+    int bend_mark;
+
     double last_note_on;
     char *comm;
-} instr_comment[MAX_CHANNELS];
+} ChannelStatus[MAX_CHANNELS];
 
 enum indicator_mode_t
 {
@@ -118,20 +148,23 @@ static char *comment_indicator_buffer = NULL;
 static char *current_indicator_message = NULL;
 static char *indicator_msgptr = NULL;
 static int current_indicator_chan = 0;
-static int next_indicator_chan = -1;
 static double indicator_last_update;
 static int indicator_mode = INDICATOR_DEFAULT;
 static int display_velocity_flag = 0;
+static int display_channels = 16;
 
 static Bitset channel_program_flags[MAX_CHANNELS];
+static Bitset gs_lcd_bits[MAX_CHANNELS];
+static int is_display_lcd = 1;
 static int scr_modified_flag = 1; /* delay flush for trace mode */
+
 
 static void update_indicator(void);
 static void reset_indicator(void);
 static void indicator_chan_update(int ch);
-static void indicator_set_prog(int ch, int val, char *comm);
 static void display_lyric(char *lyric, int sep);
 static void display_play_system(int mode);
+static void display_aq_ratio(void);
 
 #define LYRIC_WORD_NOSEP	0
 #define LYRIC_WORD_SEP		' '
@@ -157,13 +190,17 @@ static const char note_name_char[12] =
 };
 
 static void ctl_note(int status, int ch, int note, int vel);
-static void ctl_program(int ch, int val, char *vp);
+static void ctl_drumpart(int ch, int is_drum);
+static void ctl_program(int ch, int prog, char *vp, unsigned int banks);
 static void ctl_volume(int channel, int val);
 static void ctl_expression(int channel, int val);
 static void ctl_panning(int channel, int val);
 static void ctl_sustain(int channel, int val);
+static void update_bend_mark(int ch);
 static void ctl_pitch_bend(int channel, int val);
+static void ctl_mod_wheel(int channel, int wheel);
 static void ctl_lyric(int lyricid);
+static void ctl_gslcd(int id);
 static void ctl_reset(void);
 
 /**********************************************/
@@ -202,6 +239,7 @@ ControlMode ctl=
 {
     "ncurses interface", 'n',
     1,0,0,
+    0,
     ctl_open,
     ctl_close,
     ctl_pass_playing_list,
@@ -232,7 +270,8 @@ enum ctl_ncurs_mode_t
     NCURS_MODE_CMD_E,	/* Extensional mode */
     NCURS_MODE_CMD_FSEARCH,	/* forward search MIDI file */
     NCURS_MODE_CMD_D,	/* Change drum channel */
-    NCURS_MODE_CMD_S	/* Save as */
+    NCURS_MODE_CMD_S,	/* Save as */
+    NCURS_MODE_CMD_R	/* Change sample rate */
 };
 static int ctl_ncurs_mode = NCURS_MODE_MAIN; /* current mode */
 static int ctl_ncurs_back = NCURS_MODE_MAIN; /* prev mode to back from help */
@@ -251,6 +290,7 @@ static struct double_list_string *ctl_mode_L_histc = NULL; /* current */
 
 static void ctl_ncurs_mode_init(void);
 static void init_trace_window_chan(int ch);
+static void init_chan_status(void);
 static void ctl_cmd_J_move(int diff);
 static int ctl_cmd_J_enter(void);
 static void ctl_cmd_L_dir(int move);
@@ -360,35 +400,40 @@ static void N_ctl_clrtoeol(int row)
     int i;
 
     wmove(dftwin, row, 0);
-#ifdef WREFRESH_CACHED
     for(i = 0; i < COLS; i++)
 	waddch(dftwin, ' ');
-#endif
-    wrefresh(dftwin);
     wmove(dftwin, row, 0);
+    wrefresh(dftwin);
+}
+
+/* werase() is not collectly work if multibyte font is displayed. */
+static void N_ctl_werase(WINDOW *w)
+{
+#ifdef WREFRESH_CACHED
+    int x, y, xsize, ysize;
+    getmaxyx(w, ysize, xsize);
+    for(y = 0; y < ysize; y++)
+    {
+	wmove(w, y, 0);
+	for(x = 0; x < xsize; x++)
+	    waddch(w, ' ');
+    }
+#else
+    werase(w);
+#endif /* WREFRESH_CACHED */
+    wmove(w, 0, 0);
+    wrefresh(w);
 }
 
 static void N_ctl_scrinit(void)
 {
-    int i, j;
+    int i;
 
-#ifdef WREFRESH_CACHED
-    for(j = 0; j < LINES; j++)
-    {
-	wmove(dftwin, j, 0);
-	for(i = 0; i < COLS; i++)
-	    waddch(dftwin, ' ');
-    }
-    wrefresh(dftwin);
-#else
-    werase(dftwin);
-    wrefresh(dftwin);
-#endif /* WREFRESH_CACHED */
-
+    N_ctl_werase(dftwin);
     wmove(dftwin, VERSION_LINE,0);
     waddstr(dftwin, "TiMidity++ v"); waddstr(dftwin, timidity_version);
-    wmove(dftwin, VERSION_LINE,COLS-52);
-    waddstr(dftwin, "(C) 1995 Tuukka Toivonen <toivonen@clinet.fi>");
+    wmove(dftwin, VERSION_LINE,COLS-54);
+    waddstr(dftwin, "(C) 1995,1999-2002 Tuukka Toivonen, Masanao Izumo");
     wmove(dftwin, FILE_LINE,0);
     waddstr(dftwin, "File:");
 #ifdef MIDI_TITLE
@@ -416,13 +461,14 @@ static void N_ctl_scrinit(void)
     indicator_width = COLS - 2;
     if(indicator_width < 40)
 	indicator_width = 40;
-    if(comment_indicator_buffer == NULL)
-      {
-	memset(comment_indicator_buffer =
-	       (char *)safe_malloc(indicator_width), 0, indicator_width);
-	memset(current_indicator_message =
-	       (char *)safe_malloc(indicator_width), 0, indicator_width);
-      }
+    if(comment_indicator_buffer != NULL)
+	free(comment_indicator_buffer);
+    if(current_indicator_message != NULL)
+	free(current_indicator_message);
+    memset(comment_indicator_buffer =
+	   (char *)safe_malloc(indicator_width), 0, indicator_width);
+    memset(current_indicator_message =
+	   (char *)safe_malloc(indicator_width), 0, indicator_width);
     
     if(ctl.trace_playing)
     {
@@ -451,8 +497,11 @@ static void N_ctl_scrinit(void)
 	for(i = 0; i < COLS; i++)
 	    waddch(dftwin, '-');
 #endif
-	for(i = 0; i < 16; i++)
+	for(i = 0; i < MAX_CHANNELS; i++)
+	{
 	    init_bitset(channel_program_flags + i, 128);
+	    init_bitset(gs_lcd_bits + i, 128);
+	}
     }
     N_ctl_refresh();
 }
@@ -467,7 +516,7 @@ static void init_trace_window_chan(int ch)
 {
     int i, c;
 
-    if(ch >= 16)
+    if(ch >= display_channels)
 	return;
 
     N_ctl_clrtoeol(NOTE_LINE + ch);
@@ -480,143 +529,142 @@ static void init_trace_window_chan(int ch)
 
 	for(i = 0; i < c; i++)
 	    waddch(dftwin, '.');
-	if(ISDRUMCHANNEL(ch))
-	    ctl_program(ch, channel[ch].bank, channel_instrum_name(ch));
-	else
-	    ctl_program(ch, channel[ch].program, channel_instrum_name(ch));
-	ctl_volume(0, CTL_STATUS_INIT);
-	ctl_volume(ch, channel[ch].volume);
-	ctl_expression(0, CTL_STATUS_INIT);
-	ctl_expression(ch, channel[ch].expression);
-	ctl_panning(ch, channel[ch].panning);
-	ctl_sustain(ch, channel[ch].sustain);
-	ctl_pitch_bend(ch, CTL_STATUS_INIT);
-	if(channel[ch].pitchbend == 0x2000 && channel[ch].modulation_wheel > 0)
-	    ctl_pitch_bend(ch, -2);
-	else
-	    ctl_pitch_bend(ch, channel[ch].pitchbend);
+	ctl_program(ch, CTL_STATUS_UPDATE, NULL, 0);
+	ctl_volume(ch, CTL_STATUS_UPDATE);
+	ctl_expression(ch, CTL_STATUS_UPDATE);
+	ctl_panning(ch, CTL_STATUS_UPDATE);
+	ctl_sustain(ch, CTL_STATUS_UPDATE);
+	update_bend_mark(ch);
 	clear_bitset(channel_program_flags + ch, 0, 128);
     }
     else
     {
+	ToneBankElement *prog;
+	ToneBank *bank;
+	int b, type, pr;
+
 	wattron(dftwin, A_BOLD);
 	wprintw(dftwin, "%02d ", ch + 1);
 	wattroff(dftwin, A_BOLD);
 
-	if(ISDRUMCHANNEL(ch))
+	b = ChannelStatus[ch].bank;
+	pr = ChannelStatus[ch].prog;
+	bank = tonebank[b];
+	if(bank == NULL || bank->tone[pr].instrument == NULL)
 	{
-	    if(drumset[channel[ch].bank])
-		wprintw(dftwin, "Drumset %d", channel[ch].bank + progbase);
-	    else
-		wprintw(dftwin, "Drumset %d(=>%d)",
-			channel[ch].bank + progbase, progbase);
+	    b = 0;
+	    bank = tonebank[0];
+	}
+
+	if(ChannelStatus[ch].is_drum)
+	{
+	    wprintw(dftwin, "Drumset Bank %d=>%d",
+		    ChannelStatus[ch].bank + progbase, b + progbase);
 	}
 	else
 	{
-	    ToneBankElement *prog;
-	    ToneBank *bank;
-	    int b, type, pr;
-
-	    b = channel[ch].bank;
-	    pr = channel[ch].program;
-	    if((bank = tonebank[b]) == NULL ||
-	       bank->tone[pr].instrument == NULL)
-	    {
-		b = 0;
-		bank = tonebank[0];
-	    }
-	    prog = &bank->tone[pr];
-
 	    if(IS_CURRENT_MOD_FILE)
 	    {
-		type = INST_MOD;
-		waddstr(dftwin, "MOD ");
+		wprintw(dftwin, "MOD %d (%s)",
+			ChannelStatus[ch].prog,
+			ChannelStatus[ch].comm ? ChannelStatus[ch].comm :
+			"Not installed");
 	    }
 	    else
 	    {
+		prog = &bank->tone[pr];
+
 		if(prog->instrument != NULL &&
-		   prog->instrument != MAGIC_LOAD_INSTRUMENT)
+		   !IS_MAGIC_INSTRUMENT(prog->instrument))
 		{
 		    type = prog->instrument->type;
-		    if(type == INST_SF2)
-			waddstr(dftwin, "SF ");
+		    /* check instrument alias */
+		    if(b != 0 &&
+		       tonebank[0]->tone[pr].instrument == prog->instrument)
+		    {
+			b = 0;
+			bank = tonebank[0];
+			prog = &bank->tone[pr];
+		    }
 		}
 		else
 		    type = -1;
-	    }
 
-	    if(type == INST_GUS)
-	    {
-		if(prog->name == NULL && b != 0)
+		wprintw(dftwin, "%d Bank %d/%d=>%d Prog %d",
+			type,
+			ChannelStatus[ch].bank_msb,
+			ChannelStatus[ch].bank_lsb,
+			b,
+			ChannelStatus[ch].prog + progbase);
+
+		if(type == INST_GUS)
 		{
-		    b = 0;
-		    bank = tonebank[0];
-		    prog = &bank->tone[pr];
+		    if(prog->name)
+		    {
+			waddch(dftwin, ' ');
+			waddstr(dftwin, prog->name);
+		    }
+		    if(prog->comment != NULL)
+			wprintw(dftwin, "(%s)", prog->comment);
 		}
-
-		wprintw(dftwin, "Bank %d%s Prog %d",
-			channel[ch].bank,
-			b == channel[ch].bank ? "" : "(=>0)",
-			pr + progbase);
-
-		if(prog->name)
+		else if(type == INST_SF2)
 		{
-		    waddch(dftwin, ' ');
-		    waddstr(dftwin, prog->name);
-		}
-		if(prog->comment != NULL)
-		    wprintw(dftwin, "(%s)", prog->comment);
-	    }
-	    else if(type == INST_SF2)
-	    {
-		char *name, *fn;
+		    char *name, *fn;
 
-		name = soundfont_preset_name(b, pr, -1, &fn);
-		if(name == NULL && b != 0)
-		{
-		    if((name = soundfont_preset_name(0, pr, -1, &fn)) != NULL)
-			b = 0;
-		}
+		    waddstr(dftwin, " (SF ");
 
-		wprintw(dftwin, "Bank %d%s Prog %d",
-			channel[ch].bank,
-			b == channel[ch].bank ? "" : "(=>0)",
-			pr + progbase);
+		    if(prog->instype == 1)
+		    {
+			/* Restore original one */
+			b = prog->font_bank;
+			pr = prog->font_preset;
+		    }
 
-		if(name != NULL)
-		{
-		    char *p;
-		    if((p = strrchr(fn, '/')) != NULL)
-			p++;
-		    else
-			p = fn;
-		    wprintw(dftwin, " (%s:%s)", name, p);
+		    name = soundfont_preset_name(b, pr, -1, &fn);
+		    if(name == NULL && b != 0)
+		    {
+			if((name = soundfont_preset_name(0, pr, -1, &fn)) != NULL)
+			    b = 0;
+		    }
+
+		    wprintw(dftwin, "%d,%d", b, pr + progbase);
+
+		    if(name != NULL)
+		    {
+			char *p;
+			if((p = pathsep_strrchr(fn)) != NULL)
+			    p++;
+			else
+			    p = fn;
+			wprintw(dftwin, ",%s", name, p);
+		    }
+		    waddch(dftwin, ')');
 		}
-	    }
-	    else if(type == INST_MOD)
-	    {
-		pr = channel[ch].special_sample;
-		if(pr > 0 && special_patch[pr] != NULL)
-		{
-		    if(special_patch[pr]->name != NULL)
-			wprintw(dftwin, "SampleID %d (%s)",
-				pr, special_patch[pr]->name);
-		    else
-			wprintw(dftwin, "SampleID %d", pr);
-		}
-		else if(pr == 0)
-		    wprintw(dftwin, "(Not installed)", pr);
-		else
-		    wprintw(dftwin, "SampleID %d (Not installed)", pr);
-	    }
-	    else
-	    {
-		wprintw(dftwin, "Bank %d%s Prog %d",
-			channel[ch].bank,
-			b == channel[ch].bank ? "" : "(=>0)",
-			pr + progbase);
 	    }
 	}
+    }
+}
+
+static void init_chan_status(void)
+{
+    int ch;
+
+    for(ch = 0; ch < MAX_CHANNELS; ch++)
+    {
+	ChannelStatus[ch].bank = 0;
+	ChannelStatus[ch].bank_msb = 0;
+	ChannelStatus[ch].bank_lsb = 0;
+	ChannelStatus[ch].prog = 0;
+	ChannelStatus[ch].is_drum = ISDRUMCHANNEL(ch);
+	ChannelStatus[ch].vol = 0;
+	ChannelStatus[ch].exp = 0;
+	ChannelStatus[ch].pan = NO_PANNING;
+	ChannelStatus[ch].sus = 0;
+	ChannelStatus[ch].pitch = 0x2000;
+	ChannelStatus[ch].wheel = 0;
+	ChannelStatus[ch].bend_mark = ' ';
+	ChannelStatus[ch].last_note_on = 0.0;
+	ChannelStatus[ch].comm = NULL;
     }
 }
 
@@ -644,6 +692,12 @@ static void display_play_system(int mode)
 static void ctl_ncurs_mode_init(void)
 {
     int i;
+
+    display_channels = LINES - 8;
+    if(display_channels > MAX_CHANNELS)
+	display_channels = MAX_CHANNELS;
+    if(current_file_info != NULL && current_file_info->max_channel < 16)
+	display_channels = 16;
 
     display_play_system(play_system_mode);
     switch(ctl_ncurs_mode)
@@ -709,13 +763,16 @@ static void ctl_help_mode(void)
 	{
 "V/Up=Louder    b/Left=Skip back      n/Next=Next file      r/Home=Restart file",
 "v/Down=Softer  f/Right=Skip forward  p/Prev=Previous file  q/End=Quit program",
-"h/?=Help mode  1-6=Reverb            s=Toggle pause        E=ExtMode-Setting",
+"h/?=Help mode  s=Toggle pause        E=ExtMode-Setting",
 "+=Key up       -=Key down            >=Speed up            <=Speed down",
 "O=Voices up    o=Voices down         c/C=Move channel      d=Toggle drum prt.",
 "J=Jump         L=Load & play (TAB: File completion)        t=Toggle trace mode",
 "%=Display velocity (toggle)          D=Drum change         S=Save as",
+"R=Change rate",
 #ifdef SUPPORT_SOUNDSPEC
 "g=Open sound spectrogram window",
+#else
+"",
 #endif /* SUPPORT_SOUNDSPEC */
 "",
 "l/INS=List mode",
@@ -727,10 +784,9 @@ NULL
 	ctl_ncurs_back = ctl_ncurs_mode;
 	ctl_ncurs_mode = NCURS_MODE_HELP;
 	helpwin = newwin(LIST_TITLE_LINES, COLS, TITLE_LINE, 0);
-	werase(helpwin);
-	wrefresh(helpwin);
+	N_ctl_werase(helpwin);
 	wattron(helpwin, A_BOLD);
-	waddstr(helpwin, "                 NEW ncurses interface Help");
+	waddstr(helpwin, "                 ncurses interface Help");
 	wattroff(helpwin, A_BOLD);
 
 	for(i = 0; help_message_list[i]; i++)
@@ -741,7 +797,7 @@ NULL
 	wmove(helpwin, i+2,0);
 	wattron(helpwin, A_BOLD);
 	waddstr(helpwin,
-		"                   Type `h' to go to privious screen");
+		"                   Type `h' to go to previous screen");
 	wattroff(helpwin, A_BOLD);
 	wrefresh(helpwin);
 	N_ctl_clrtoeol(LINES - 1);
@@ -767,7 +823,7 @@ static void ctl_list_MFnode_files(MFnode *mfp, int select_id, int play_id)
 #endif /* DISPLAY_MID_MODE */
 #endif /* MIDI_TITLE */
 
-    werase(listwin);
+    N_ctl_werase(listwin);
     mk = 0;
     for(i = 0; i < LIST_TITLE_LINES && mfp; i++, mfp = mfp->next)
     {
@@ -784,7 +840,7 @@ static void ctl_list_MFnode_files(MFnode *mfp, int select_id, int play_id)
 
 #ifdef MIDI_TITLE
 
-	if((f = strrchr(mfp->file, PATH_SEP)) != NULL)
+	if((f = pathsep_strrchr(mfp->file)) != NULL)
 	    f++;
 	else
 	    f = mfp->file;
@@ -936,16 +992,31 @@ static void ctl_list_mode(int type)
     }
 }
 
+static void redraw_all(void)
+{
+    N_ctl_scrinit();
+    ctl_total_time(CTL_STATUS_UPDATE);
+    ctl_master_volume(CTL_STATUS_UPDATE);
+    display_key_helpmsg();
+    ctl_file_name(NULL);
+    ctl_ncurs_mode_init();
+}
+
 static void ctl_event(CtlEvent *e)
 {
+    if(midi_trace.flush_flag)
+	return;
     switch(e->type)
     {
       case CTLE_NOW_LOADING:
 	ctl_file_name((char *)e->v1);
 	break;
       case CTLE_LOADING_DONE:
+	redraw_all();
 	break;
       case CTLE_PLAY_START:
+	init_chan_status();
+	ctl_ncurs_mode_init();
 	ctl_total_time((int)e->v1);
 	break;
       case CTLE_PLAY_END:
@@ -957,6 +1028,7 @@ static void ctl_event(CtlEvent *e)
 	break;
       case CTLE_CURRENT_TIME:
 	ctl_current_time((int)e->v1, (int)e->v2);
+	display_aq_ratio();
 	break;
       case CTLE_NOTE:
 	ctl_note((int)e->v1, (int)e->v2, (int)e->v3, (int)e->v4);
@@ -965,7 +1037,10 @@ static void ctl_event(CtlEvent *e)
 	ctl_master_volume((int)e->v1);
 	break;
       case CTLE_PROGRAM:
-	ctl_program((int)e->v1, (int)e->v2, (char *)e->v3);
+	ctl_program((int)e->v1, (int)e->v2, (char *)e->v3, (unsigned int)e->v4);
+	break;
+      case CTLE_DRUMPART:
+	ctl_drumpart((int)e->v1, (int)e->v2);
 	break;
       case CTLE_VOLUME:
 	ctl_volume((int)e->v1, (int)e->v2);
@@ -983,7 +1058,7 @@ static void ctl_event(CtlEvent *e)
 	ctl_pitch_bend((int)e->v1, (int)e->v2);
 	break;
       case CTLE_MOD_WHEEL:
-	ctl_pitch_bend((int)e->v1, e->v2 ? -2 : CTL_LAST_STATUS);
+	ctl_mod_wheel((int)e->v1, (int)e->v2);
 	break;
       case CTLE_CHORUS_EFFECT:
 	break;
@@ -991,6 +1066,10 @@ static void ctl_event(CtlEvent *e)
 	break;
       case CTLE_LYRIC:
 	ctl_lyric((int)e->v1);
+	break;
+      case CTLE_GSLCD:
+	if(is_display_lcd)
+	    ctl_gslcd((int)e->v1);
 	break;
       case CTLE_REFRESH:
 	ctl_refresh();
@@ -1000,15 +1079,19 @@ static void ctl_event(CtlEvent *e)
 	break;
       case CTLE_SPEANA:
 	break;
+      case CTLE_PAUSE:
+	ctl_current_time((int)e->v2, 0);
+	N_ctl_refresh();
+	break;
     }
 }
 
 static void ctl_total_time(int tt)
 {
-    static int last_tt = CTL_LAST_STATUS;
+    static int last_tt = CTL_STATUS_UPDATE;
     int mins, secs;
 
-    if(tt == CTL_LAST_STATUS)
+    if(tt == CTL_STATUS_UPDATE)
 	tt = last_tt;
     else
 	last_tt = tt;
@@ -1027,9 +1110,9 @@ static void ctl_total_time(int tt)
 
 static void ctl_master_volume(int mv)
 {
-    static int lastvol = CTL_LAST_STATUS;
+    static int lastvol = CTL_STATUS_UPDATE;
 
-    if(mv == CTL_LAST_STATUS)
+    if(mv == CTL_STATUS_UPDATE)
 	mv = lastvol;
     else
 	lastvol = mv;
@@ -1067,63 +1150,59 @@ static void ctl_file_name(char *name)
 
 static void ctl_current_time(int secs, int v)
 {
-  int mins;
-  static int last_voices = CTL_STATUS_INIT, last_v = CTL_STATUS_INIT;
-  static int last_secs = CTL_STATUS_INIT;
+    int mins;
+    static int last_voices = CTL_STATUS_INIT, last_v = CTL_STATUS_INIT;
+    static int last_secs = CTL_STATUS_INIT;
 
-  if(secs == CTL_STATUS_INIT)
-  {
-      last_voices = last_v = last_secs = CTL_STATUS_INIT;
-      return;
-  }
+    if(secs == CTL_STATUS_INIT)
+    {
+	last_voices = last_v = last_secs = CTL_STATUS_INIT;
+	return;
+    }
 
-  if(midi_trace.flush_flag)
-      return;
+    if(last_secs != secs)
+    {
+	last_secs = secs;
+	mins = secs/60;
+	secs -= mins*60;
+	wmove(dftwin, TIME_LINE, 5);
+	wattron(dftwin, A_BOLD);
+	wprintw(dftwin, "%3d:%02d", mins, secs);
+	wattroff(dftwin, A_BOLD);
+	scr_modified_flag = 1;
+    }
 
-  if(last_secs != secs)
-  {
-      last_secs = secs;
-      mins=secs/60;
-      secs-=mins*60;
-      wmove(dftwin, TIME_LINE,5);
-      wattron(dftwin, A_BOLD);
-      wprintw(dftwin, "%3d:%02d", mins, secs);
-      wattroff(dftwin, A_BOLD);
-      scr_modified_flag = 1;
-  }
+    if(last_v != v)
+    {
+	last_v = v;
+	wmove(dftwin, VOICE_LINE, 47);
+	wattron(dftwin, A_BOLD);
+	wprintw(dftwin, "%3d", v);
+	wattroff(dftwin, A_BOLD);
+	scr_modified_flag = 1;
+    }
 
-  if(last_v != v)
-  {
-      last_v = v;
-      wmove(dftwin, VOICE_LINE,47);
-      wattron(dftwin, A_BOLD);
-      wprintw(dftwin, "%3d", v);
-      wattroff(dftwin, A_BOLD);
-      scr_modified_flag = 1;
-  }
-
-  if(last_voices != voices)
-  {
-      last_voices = voices;
-      wmove(dftwin, VOICE_LINE, 52);
-      wprintw(dftwin, "%3d", voices);
-      scr_modified_flag = 1;
-  }
+    if(last_voices != voices)
+    {
+	last_voices = voices;
+	wmove(dftwin, VOICE_LINE, 52);
+	wprintw(dftwin, "%3d", voices);
+	scr_modified_flag = 1;
+    }
 }
 
 static void ctl_note(int status, int ch, int note, int vel)
 {
-    int xl, n, c;
-    unsigned int onoff, check, prev_check;
+    int n, c;
+    unsigned int onoff = 0, check, prev_check;
     Bitset *bitset;
 
-    if(ch >= 16)
-	return;
-
-    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
+    if(ch >= display_channels || ctl_ncurs_mode != NCURS_MODE_TRACE ||
+       selected_channel == ch)
 	return;
 
     scr_modified_flag = 1;
+
     if(display_velocity_flag)
 	n = '0' + (10 * vel) / 128;
     else
@@ -1131,8 +1210,10 @@ static void ctl_note(int status, int ch, int note, int vel)
     c = (COLS - 24) / 12 * 12;
     if(c <= 0)
 	c = 1;
-    xl=note % c;
-    wmove(dftwin, NOTE_LINE + ch, xl + 3);
+    note = note % c;
+    wmove(dftwin, NOTE_LINE + ch, note + 3);
+    bitset = channel_program_flags + ch;
+
     switch(status)
     {
       case VOICE_DIE:
@@ -1140,7 +1221,10 @@ static void ctl_note(int status, int ch, int note, int vel)
 	onoff = 0;
 	break;
       case VOICE_FREE:
-	waddch(dftwin, '.');
+	if(get_bitset1(gs_lcd_bits + ch, note))
+	    waddch(dftwin, GS_LCD_MARK_CHAR);
+	else
+	    waddch(dftwin, '.');
 	onoff = 0;
 	break;
       case VOICE_ON:
@@ -1160,21 +1244,27 @@ static void ctl_note(int status, int ch, int note, int vel)
 	waddch(dftwin, n);
 	onoff = 0;
 	break;
+      case GS_LCD_MARK_ON:
+	set_bitset1(gs_lcd_bits + ch, note, 1);
+	if(!get_bitset1(bitset, note))
+	    waddch(dftwin, GS_LCD_MARK_CHAR);
+	return;
+      case GS_LCD_MARK_OFF:
+	set_bitset1(gs_lcd_bits + ch, note, 0);
+	if(!get_bitset1(bitset, note))
+	    waddch(dftwin, '.');
+	return;
     }
 
-    bitset = channel_program_flags + ch;
     prev_check = has_bitset(bitset);
+    set_bitset1(bitset, note, onoff);
     if(prev_check == onoff)
     {
 	/* Not change program mark */
-	onoff <<= (8 * sizeof(onoff) - 1);
-	set_bitset(bitset, &onoff, note, 1);
 	return;
     }
-    onoff <<= (8 * sizeof(onoff) - 1);
-    set_bitset(bitset, &onoff, note, 1);
-    check = has_bitset(bitset);
 
+    check = has_bitset(bitset);
     if(prev_check ^ check)
     {
 	wmove(dftwin, NOTE_LINE + ch, COLS - 21);
@@ -1191,187 +1281,250 @@ static void ctl_note(int status, int ch, int note, int vel)
     }
 }
 
-static void ctl_program(int ch, int val, char *comm)
+static void ctl_drumpart(int ch, int is_drum)
 {
-    int pr;
+    if(ch >= display_channels)
+	return;
+    ChannelStatus[ch].is_drum = is_drum;
+}
 
-    if(ch >= 16)
+static void ctl_program(int ch, int prog, char *comm, unsigned int banks)
+{
+    int val;
+    int bank;
+
+    if(ch >= display_channels)
 	return;
 
-    if(!ctl.trace_playing)
-	return;
-
-    if(channel[ch].special_sample)
-	pr = val = channel[ch].special_sample;
-    else
-	pr = val + progbase;
-
-    if(ctl_ncurs_mode == NCURS_MODE_TRACE)
+    if(prog != CTL_STATUS_UPDATE)
     {
-	if(ch == selected_channel)
-	    init_trace_window_chan(ch);
-	else
-	{
-	    wmove(dftwin, NOTE_LINE+ch, COLS-21);
-	    if(ISDRUMCHANNEL(ch))
-	    {
-		wattron(dftwin, A_BOLD);
-		wprintw(dftwin, " %03d", pr);
-		wattroff(dftwin, A_BOLD);
-	    }
-	    else
-		wprintw(dftwin, " %03d", pr);
-	}
+	bank = banks & 0xff;
+	ChannelStatus[ch].prog = prog;
+	ChannelStatus[ch].bank = bank;
+	ChannelStatus[ch].bank_lsb = (banks >> 8) & 0xff;
+	ChannelStatus[ch].bank_msb = (banks >> 16) & 0xff;
+	ChannelStatus[ch].comm = (comm ? comm : "");
+    } else {
+	prog = ChannelStatus[ch].prog;
+	bank = ChannelStatus[ch].bank;
+    }
+    ChannelStatus[ch].last_note_on = 0.0;	/* reset */
+
+    if(ctl_ncurs_mode != NCURS_MODE_TRACE)
+	return;
+
+    if(selected_channel == ch)
+    {
+	init_trace_window_chan(ch);
+	return;
     }
 
-    if(comm != NULL)
-	indicator_set_prog(ch, val, comm);
+    if(ChannelStatus[ch].is_drum)
+	val = bank;
+    else
+	val = prog;
+    if(!IS_CURRENT_MOD_FILE)
+	val += progbase;
+
+    wmove(dftwin, NOTE_LINE + ch, COLS - 21);
+    if(ChannelStatus[ch].is_drum)
+    {
+	wattron(dftwin, A_BOLD);
+	wprintw(dftwin, " %03d", val);
+	wattroff(dftwin, A_BOLD);
+    }
+    else
+	wprintw(dftwin, " %03d", val);
     scr_modified_flag = 1;
-
-
 }
 
 static void ctl_volume(int ch, int vol)
 {
-    static int last_vols[16];
-    int i;
-
-    if(ch >= 16)
+    if(ch >= display_channels)
 	return;
 
-    if(vol == CTL_STATUS_INIT)
+    if(vol != CTL_STATUS_UPDATE)
     {
-	for(i = 0; i < 16; i++)
-	    last_vols[i] = CTL_STATUS_INIT;
-	return;
+	if(ChannelStatus[ch].vol == vol)
+	    return;
+	ChannelStatus[ch].vol = vol;
     }
-
-    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
-	return;
-
-    if(last_vols[ch] != vol)
-    {
-	last_vols[ch] = vol;
-	wmove(dftwin, NOTE_LINE + ch, COLS - 16);
-	wprintw(dftwin, "%3d", vol);
-	scr_modified_flag = 1;
-    }
-}
-
-static void ctl_expression(int ch, int vol)
-{
-    static int last_vols[16];
-    int i;
-
-    if(ch >= 16)
-	return;
-
-    if(vol == CTL_STATUS_INIT)
-    {
-	for(i = 0; i < 16; i++)
-	    last_vols[i] = CTL_STATUS_INIT;
-	return;
-    }
-
-    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
-	return;
-
-    if(last_vols[ch] != vol)
-    {
-	last_vols[ch] = vol;
-	wmove(dftwin, NOTE_LINE + ch, COLS - 12);
-	wprintw(dftwin, "%3d", vol);
-	scr_modified_flag = 1;
-    }
-}
-
-static void ctl_panning(int ch, int val)
-{
-    if(ch >= 16)
-	return;
-    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
-	return;
-    wmove(dftwin, NOTE_LINE + ch, COLS - 8);
-    if(val == NO_PANNING)
-	waddstr(dftwin, "   ");
-    else if(val < 5)
-	waddstr(dftwin, " L ");
-    else if(val > 123)
-	waddstr(dftwin, " R ");
-    else if(val > 60 && val < 68)
-	waddstr(dftwin, " C ");
     else
+	vol = ChannelStatus[ch].vol;
+
+    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
+	return;
+
+    wmove(dftwin, NOTE_LINE + ch, COLS - 16);
+    wprintw(dftwin, "%3d", vol);
+    scr_modified_flag = 1;
+}
+
+static void ctl_expression(int ch, int exp)
+{
+    if(ch >= display_channels)
+	return;
+
+    if(exp != CTL_STATUS_UPDATE)
     {
-	val -= 64;
-	if(val < 0)
+	if(ChannelStatus[ch].exp == exp)
+	    return;
+	ChannelStatus[ch].exp = exp;
+    }
+    else
+	exp = ChannelStatus[ch].exp;
+
+    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
+	return;
+
+    wmove(dftwin, NOTE_LINE + ch, COLS - 12);
+    wprintw(dftwin, "%3d", exp);
+    scr_modified_flag = 1;
+}
+
+static void ctl_panning(int ch, int pan)
+{
+    if(ch >= display_channels)
+	return;
+
+    if(pan != CTL_STATUS_UPDATE)
+    {
+	if(pan == NO_PANNING)
+	    ;
+	else if(pan < 5)
+	    pan = 0;
+	else if(pan > 123)
+	    pan = 127;
+	else if(pan > 60 && pan < 68)
+	    pan = 64;
+	if(ChannelStatus[ch].pan == pan)
+	    return;
+	ChannelStatus[ch].pan = pan;
+    }
+    else
+	pan = ChannelStatus[ch].pan;
+
+    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
+	return;
+
+    wmove(dftwin, NOTE_LINE + ch, COLS - 8);
+    switch(pan)
+    {
+      case NO_PANNING:
+	waddstr(dftwin, "   ");
+	break;
+      case 0:
+	waddstr(dftwin, " L ");
+	break;
+      case 64:
+	waddstr(dftwin, " C ");
+	break;
+      case 127:
+	waddstr(dftwin, " R ");
+	break;
+      default:
+	pan -= 64;
+	if(pan < 0)
 	{
 	    waddch(dftwin, '-');
-	    val = -val;
+	    pan = -pan;
 	}
 	else 
 	    waddch(dftwin, '+');
-	wprintw(dftwin, "%02d", val);
+	wprintw(dftwin, "%02d", pan);
+	break;
     }
     scr_modified_flag = 1;
 }
 
-static void ctl_sustain(int ch, int val)
+static void ctl_sustain(int ch, int sus)
 {
-    if(ch >= 16)
+    if(ch >= display_channels)
 	return;
+
+    if(sus != CTL_STATUS_UPDATE)
+    {
+	if(ChannelStatus[ch].sus == sus)
+	    return;
+	ChannelStatus[ch].sus = sus;
+    }
+    else
+	sus = ChannelStatus[ch].sus;
+
     if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
 	return;
-    wmove(dftwin, NOTE_LINE+ch, COLS - 4);
-    if(val)
+
+    wmove(dftwin, NOTE_LINE + ch, COLS - 4);
+    if(sus)
 	waddch(dftwin, 'S');
     else
 	waddch(dftwin, ' ');
     scr_modified_flag = 1;
 }
 
-static void ctl_pitch_bend(int ch, int val)
+static void update_bend_mark(int ch)
 {
-    static int lastbends[16];
-    int i, restore;
+    wmove(dftwin, NOTE_LINE + ch, COLS - 2);
+    waddch(dftwin, ChannelStatus[ch].bend_mark);
+    scr_modified_flag = 1;
+}
 
-    if(ch >= 16)
+static void ctl_pitch_bend(int ch, int pitch)
+{
+    int mark;
+
+    if(ch >= display_channels)
 	return;
 
-    if(val == CTL_STATUS_INIT)
-    {
-	for(i = 0; i < 16; i++)
-	    lastbends[i] = CTL_STATUS_INIT;
-	return;
-    }
+    ChannelStatus[ch].pitch = pitch;
 
     if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
 	return;
 
-    if(val == CTL_LAST_STATUS)
-    {
-	restore = 1;
-	val = lastbends[ch];
-	if(!val || (val != '<' && val != '>'))
-	    val = ' ';
-    }
+    if(ChannelStatus[ch].wheel)
+	mark = '=';
+    else if(pitch > 0x2000)
+	mark = '>';
+    else if(pitch < 0x2000)
+	mark = '<';
+    else
+	mark = ' ';
+
+    if(ChannelStatus[ch].bend_mark == mark)
+	return;
+    ChannelStatus[ch].bend_mark = mark;
+    update_bend_mark(ch);
+}
+
+static void ctl_mod_wheel(int ch, int wheel)
+{
+    int mark;
+
+    if(ch >= display_channels)
+	return;
+
+    ChannelStatus[ch].wheel = wheel;
+
+    if(ctl_ncurs_mode != NCURS_MODE_TRACE || selected_channel == ch)
+	return;
+
+    if(wheel)
+	mark = '=';
     else
     {
-	restore = 0;
-	if (val==-2) val = '=';
-	else if (val>0x2000) val = '>';
-	else if (val<0x2000) val = '<';
-	else val = ' ';
+	/* restore pitch bend mark */
+	if(ChannelStatus[ch].pitch > 0x2000)
+	    mark = '>';
+	else if(ChannelStatus[ch].pitch < 0x2000)
+	    mark = '<';
+	else
+	    mark = ' ';
     }
 
-    if(restore || lastbends[ch] != val)
-    {
-	if(val != '=')
-	    lastbends[ch] = val;
-	else lastbends[ch] = ' ';
-	wmove(dftwin, NOTE_LINE+ch, COLS-2);
-	waddch(dftwin, val);
-	scr_modified_flag = 1;
-    }
+    if(ChannelStatus[ch].bend_mark == mark)
+	return;
+    ChannelStatus[ch].bend_mark = mark;
+    update_bend_mark(ch);
 }
 
 static void ctl_lyric(int lyricid)
@@ -1386,7 +1539,7 @@ static void ctl_lyric(int lyricid)
             while (strchr(lyric, '\r')) {
             	*(strchr(lyric, '\r')) = ' ';
             }
- 	    if (ctl.trace_playing) {
+	    if (ctl.trace_playing) {
 		while (strchr(lyric, '\n')) {
 		    *(strchr(lyric, '\n')) = '\r';
 		}
@@ -1424,9 +1577,87 @@ static void ctl_lyric(int lyricid)
     }
 }
 
+static void ctl_lcd_mark(int status, int x, int y)
+{
+    int w;
+
+    if(!ctl.trace_playing)
+    {
+	waddch(msgwin, status == GS_LCD_MARK_ON ? GS_LCD_MARK_CHAR : ' ');
+	return;
+    }
+
+    w = (COLS - 24) / 12 * 12;
+    if(status == GS_LCD_MARK_CLEAR)
+      {
+	int x, y;
+	for(y = 0; y < 16; y++)
+	  for(x = 0; x < 40; x++)
+	    ctl_note(GS_LCD_MARK_OFF, y, x + (w - 40) / 2, 0);
+	return;
+      }
+
+    if(w < GS_LCD_WIDTH)
+    {
+	if(x < w)
+	    ctl_note(status, y, x, 0);
+    }
+    else
+    {
+	ctl_note(status, y, x + (w - GS_LCD_WIDTH) / 2, 0);
+    }
+}
+
+static void ctl_gslcd(int id)
+{
+    char *lcd;
+    int i, j, k, data, mask;
+    char tmp[3];
+
+    if((lcd = event2string(id)) == NULL)
+	return;
+    if(lcd[0] != ME_GSLCD)
+	return;
+    gslcd_last_display_time = get_current_calender_time();
+    gslcd_displayed_flag = 1;
+    lcd++;
+    for(i = 0; i < 16; i++)
+    {
+	for(j = 0; j < 4; j++)
+	{
+	    tmp[0]= lcd[2 * (j * 16 + i)];
+	    tmp[1]= lcd[2 * (j * 16 + i) + 1];
+	    if(sscanf(tmp, "%02X", &data) != 1)
+	    {
+		/* Invalid format */
+		return;
+	    }
+	    mask = 0x10;
+	    for(k = 0; k < 10; k += 2)
+	    {
+		if(data & mask)
+		{
+ 		    ctl_lcd_mark(GS_LCD_MARK_ON, j * 10 + k,     i);
+		    ctl_lcd_mark(GS_LCD_MARK_ON, j * 10 + k + 1, i);
+		}
+		else
+	        {
+ 		    ctl_lcd_mark(GS_LCD_MARK_OFF, j * 10 + k,     i);
+		    ctl_lcd_mark(GS_LCD_MARK_OFF, j * 10 + k + 1, i);
+		}
+		mask >>= 1;
+	    }
+	}
+	if(!ctl.trace_playing)
+	{
+	    waddch(msgwin, '\n');
+	    wrefresh(msgwin);
+	}
+    }
+}
+
 static void ctl_reset(void)
 {
-    trace_flush();
     if(ctl.trace_playing)
 	reset_indicator();
     N_ctl_refresh();
@@ -1491,9 +1722,12 @@ static int ctl_open(int using_stdin, int using_stdout)
 	nonl();
 	nodelay(stdscr, 1);
 	scrollok(stdscr, 0);
+#ifndef USE_PDCURSES
 	idlok(stdscr, 1);
+#endif /* USE_PDCURSES */
 	keypad(stdscr, TRUE);
 	ctl.opened = 1;
+	init_chan_status();
     }
 
     open_init_flag = 1;
@@ -1518,7 +1752,7 @@ static int ctl_open(int using_stdin, int using_stdout)
     {
 	set_trace_loop_hook(NULL);
 	msgwin = newwin(LINES - 6 - 1, COLS, 6, 0);
-	werase(msgwin);
+	N_ctl_werase(msgwin);
 	scrollok(msgwin, 1);
 	wrefresh(msgwin);
     }
@@ -1569,12 +1803,15 @@ static void move_select_channel(int diff)
     else
 	selected_channel += diff;
     while(selected_channel < 0)
-	selected_channel += 17;
-    while(selected_channel >= 16)
-	selected_channel -= 17;
+	selected_channel += display_channels + 1;
+    while(selected_channel >= display_channels)
+	selected_channel -= display_channels + 1;
 
     if(selected_channel != -1)
+    {
 	init_trace_window_chan(selected_channel);
+	current_indicator_chan = selected_channel;
+    }
     N_ctl_refresh();
 }
 
@@ -1643,7 +1880,7 @@ static void ctl_cmd_L_dir(int move)
 	move = 0;
     }
 
-    werase(listwin);
+    N_ctl_werase(listwin);
 
     if(command_buffer->files == NULL)
     {
@@ -1663,8 +1900,7 @@ static void ctl_cmd_L_dir(int move)
 	ctl_mode_L_dispstart = 0;
     }
 
-    werase(listwin);
-    wmove(listwin, 0, 0);
+    N_ctl_werase(listwin);
     waddstr(listwin, "Possible completions are:");
     for(i = 0; i < LIST_TITLE_LINES - 1 && mfp; i++, mfp = mfp->next)
     {
@@ -1680,9 +1916,10 @@ static int ctl_cmd_L_enter(void)
     char *text;
     MFnode *mfp;
     int i, rc = RC_NONE;
-    extern ArchiveFileList *archive_file_list;
-    ArchiveFileList *lp;
     struct double_list_string *hist;
+    int nfiles;
+    char *files[1], **new_files;
+    MFnode *tail, *head;
 
     ctl_cmd_dir_close();
     text = mini_buff_gets(command_buffer);
@@ -1702,40 +1939,22 @@ static int ctl_cmd_L_enter(void)
     ctl_mode_L_histh = hist;
 
     i = strlen(ctl_mode_L_lastenter);
-    while(i > 0 && ctl_mode_L_lastenter[i - 1] != PATH_SEP)
+    while(i > 0 && !IS_PATH_SEP(ctl_mode_L_lastenter[i - 1]))
 	i--;
     ctl_mode_L_lastenter[i] = '\0';
 
-    archive_file_list = add_archive_list(archive_file_list, text);
-    lp = find_archiver(archive_file_list, text, NULL);
 
-    if(lp == NULL || lp->archiver == NULL)
-    {
-	if(last_archive_file_list != NULL &&
-	   last_archive_file_list->errstatus != 0)
-	{
-	    errno = last_archive_file_list->errstatus;
-	    mfp = NULL;
-	}
-	else
-	{
-	    mfp = make_new_MFnode_entry(text);
-	    if(mfp != NULL)
-		mfp->file = safe_strdup(mfp->file);
-	}
-    }
+    /* Add new files */
+    files[0] = text;
+    nfiles  = 1;
+    new_files = expand_file_archives(files, &nfiles);
+    if(new_files == NULL)
+      {
+	rc = RC_NONE;
+	beep();
+      }
     else
-    {
-	int nfiles;
-	char *files[1], **new_files;
-	MFnode *tail, *head;
-	int i;
-
-	/* make archive file table */
-	files[0] = text;
-	nfiles  = 1;
-	new_files = expand_archive_names(archive_file_list, &nfiles, files);
-
+      {
 	head = tail = NULL;
 	for(i = 0; i < nfiles; i++)
 	{
@@ -1748,17 +1967,14 @@ static int ctl_cmd_L_enter(void)
 	    }
 	}
 	mfp = head;
-	if(new_files != files)
-	    free(new_files);
-    }
-
-    if(mfp == NULL)
-    {
-	rc = RC_NONE;
-	beep();
-    }
-    else
-    {
+	free(new_files[0]);
+	free(new_files);
+	if(mfp == NULL)
+	{
+	    rc = RC_NONE;
+	    beep();
+	    goto end_enter;
+	}
 	insert_MFnode_entrys(mfp, nc_playfile);
 	ctl_list_mode(NC_LIST_NEW);
 	rc = RC_NEXT;
@@ -1813,6 +2029,22 @@ static int ctl_cmd_S_enter(void)
     return RC_NONE;
 }
 
+static int ctl_cmd_R_enter(int32 *valp)
+{
+    char *rateStr;
+    int rc = RC_NONE;
+
+    rateStr = mini_buff_gets(command_buffer);
+    if(*rateStr)
+    {
+	*valp = atoi(rateStr);
+	rc = RC_CHANGE_RATE;
+    }
+    mini_buff_clear(command_buffer);
+    ctl_cmdmode = 0;
+    return rc;
+}
+
 static int ctl_cmd_D_enter(int32 *val)
 {
     int rc = RC_NONE, ch;
@@ -1824,7 +2056,7 @@ static int ctl_cmd_D_enter(int32 *val)
 	if(*text == '+')
 	{
 	    ch = atoi(text + 1) - 1;
-	    if(ch >= 0 && ISDRUMCHANNEL(ch))
+	    if(ch >= 0 && ChannelStatus[ch].is_drum)
 	    {
 		*val = ch;
 		rc = RC_TOGGLE_DRUMCHAN;
@@ -1833,7 +2065,7 @@ static int ctl_cmd_D_enter(int32 *val)
 	else if(*text == '-')
 	{
 	    ch = atoi(text + 1) - 1;
-	    if(ch >= 0 && ISDRUMCHANNEL(ch))
+	    if(ch >= 0 && ChannelStatus[ch].is_drum)
 	    {
 		*val = ch;
 		rc = RC_TOGGLE_DRUMCHAN;
@@ -1925,7 +2157,7 @@ static int ctl_cmd_forward_search(void)
 	    mfp = file_list.MFnode_head;
 	    n = 0;
 	}
-	if((name = strrchr(mfp->file, '/')) == NULL)
+	if((name = pathsep_strrchr(mfp->file)) == NULL)
 	    name = mfp->file;
 	else
 	    name++;
@@ -1984,6 +2216,9 @@ static int ctl_read(int32 *valp)
 	    case '?':
 	    case KEY_F(1):
 	      ctl_help_mode();
+	      break;
+	    case 'q':
+	      return RC_QUIT;
 	  }
 	  u_prefix = 1;
 	  continue;
@@ -2073,7 +2308,7 @@ static int ctl_read(int32 *valp)
 	  }
 	  else
 	      return RC_NEXT;
-
+#if 0
 	case '1':
 	case '2':
 	case '3':
@@ -2084,6 +2319,7 @@ static int ctl_read(int32 *valp)
 	case '6':
 	  *valp = c - '5';
 	  return RC_CHANGE_REV_TIME;
+#endif
 	case 'q':
 	case 3: /* ^C */
 	case KEY_END:
@@ -2139,6 +2375,8 @@ static int ctl_read(int32 *valp)
 	      return ctl_cmd_E_enter(valp);
 	  if(ctl_cmdmode == NCURS_MODE_CMD_S)
 	      return ctl_cmd_S_enter();
+	  if(ctl_cmdmode == NCURS_MODE_CMD_R)
+	      return ctl_cmd_R_enter(valp);
 	  if(ctl_cmdmode == NCURS_MODE_CMD_FSEARCH)
 	  {
 	      if(!ctl_cmd_forward_search())
@@ -2200,10 +2438,9 @@ static int ctl_read(int32 *valp)
 	  ctl.trace_playing = !ctl.trace_playing;
 	  if(ctl_open(0, 0))
 	      return RC_QUIT; /* Error */
-	  ctl_total_time(CTL_LAST_STATUS);
-	  ctl_master_volume(CTL_LAST_STATUS);
+	  ctl_total_time(CTL_STATUS_UPDATE);
+	  ctl_master_volume(CTL_STATUS_UPDATE);
 	  ctl_file_name(NULL);
-	  trace_nodelay(!ctl.trace_playing);
 	  display_key_helpmsg();
 	  if(ctl.trace_playing)
 	  {
@@ -2295,11 +2532,15 @@ static int ctl_read(int32 *valp)
 	  mini_buff_set(command_buffer, dftwin, LINES - 1, "MIDI File: ");
 	  if(*ctl_mode_L_lastenter == '\0' && current_MFnode != NULL)
 	  {
+	      char *p;
 	      strncpy(ctl_mode_L_lastenter, current_MFnode->file,
 		      COMMAND_BUFFER_SIZE - 1);
 	      ctl_mode_L_lastenter[COMMAND_BUFFER_SIZE - 1] = '\0';
-	      i = strlen(ctl_mode_L_lastenter);
-	      while(i > 0 && ctl_mode_L_lastenter[i - 1] != PATH_SEP)
+	      if((p = strrchr(ctl_mode_L_lastenter, '#')) != NULL)
+		  i = p - ctl_mode_L_lastenter;
+	      else
+		  i = strlen(ctl_mode_L_lastenter);
+	      while(i > 0 && !IS_PATH_SEP(ctl_mode_L_lastenter[i - 1]))
 		  i--;
 	      ctl_mode_L_lastenter[i] = '\0';
 	  }
@@ -2324,12 +2565,20 @@ static int ctl_read(int32 *valp)
 		      COMMAND_BUFFER_SIZE - 1);
 	      ctl_mode_L_lastenter[COMMAND_BUFFER_SIZE - 1] = '\0';
 	      i = strlen(ctl_mode_L_lastenter);
-	      while(i > 0 && ctl_mode_L_lastenter[i - 1] != PATH_SEP)
+	      while(i > 0 && !IS_PATH_SEP(ctl_mode_L_lastenter[i - 1]))
 		  i--;
 	      ctl_mode_L_lastenter[i] = '\0';
 	  }
 	  mini_buff_sets(command_buffer, ctl_mode_L_lastenter);
 	  continue;
+	case 'R': {
+	    char currentRate[16];
+	    ctl_cmdmode = NCURS_MODE_CMD_R;
+	    mini_buff_set(command_buffer, dftwin, LINES - 1, "Sample rate> ");
+	    sprintf(currentRate, "%d", (int)play_mode->rate);
+	    mini_buff_sets(command_buffer, currentRate);
+	    continue;
+	  }
 	case '%':
 	  display_velocity_flag = !display_velocity_flag;
 	  continue;
@@ -2341,12 +2590,7 @@ static int ctl_read(int32 *valp)
 	  }
 	  continue;
 	case 12: /* ^L */
-	  N_ctl_scrinit();
-	  ctl_total_time(CTL_LAST_STATUS);
-	  ctl_master_volume(CTL_LAST_STATUS);
-	  display_key_helpmsg();
-	  ctl_file_name(NULL);
-	  ctl_ncurs_mode_init();
+	  redraw_all();
 	  continue;
 	default:
 	  beep();
@@ -2365,7 +2609,6 @@ static int ctl_read(int32 *valp)
 static void vwprintw(WINDOW *w, char *fmt, va_list ap)
 {
     char *buff;
-    int i;
     MBlockList pool;
 
     init_mblock(&pool);
@@ -2392,7 +2635,7 @@ static int cmsg(int type, int verbosity_level, char *fmt, ...)
     }
     else
     {
-#if defined( __BORLANDC__) || (defined(__WIN32__) && !defined(__CYGWIN32__))
+#if defined( __BORLANDC__) || (defined(__W32__) && !defined(__CYGWIN32__))
 	nl();
 #endif
 	if(ctl.trace_playing)
@@ -2560,6 +2803,45 @@ static MFnode *make_new_MFnode_entry(char *file)
     return NULL;
 }
 
+static void shuffle_list(void)
+{
+    MFnode **nodeList;
+    int i, j, n;
+
+    n = file_list.number + 1;
+    /* Move MFnode into nodeList */
+    nodeList = (MFnode **)new_segment(&tmpbuffer, n * sizeof(MFnode));
+    for(i = 0; i < n; i++)
+    {
+	nodeList[i] = file_list.MFnode_head;
+	file_list.MFnode_head = file_list.MFnode_head->next;
+    }
+
+    /* Simple validate check */
+    if(file_list.MFnode_head != NULL)
+	ctl.cmsg(CMSG_ERROR, VERB_NORMAL, "BUG: MFnode_head is corrupted");
+
+    /* Construct randamized chain */
+    file_list.MFnode_head = file_list.MFnode_tail = NULL;
+    for(i = 0; i < n; i++)
+    {
+	MFnode *tmp;
+
+	j = int_rand(n - i);
+	if(file_list.MFnode_head == NULL)
+	    file_list.MFnode_head = file_list.MFnode_tail = nodeList[j];
+	else
+	    file_list.MFnode_tail = file_list.MFnode_tail->next = nodeList[j];
+
+	/* nodeList[j] is used.  Swap out it */
+	tmp = nodeList[j];
+	nodeList[j] = nodeList[n - i - 1];
+	nodeList[n - i - 1] = tmp;
+    }
+    file_list.MFnode_tail->next = NULL;
+    reuse_mblock(&tmpbuffer);
+}
+
 static void ctl_pass_playing_list(int number_of_files, char *list_of_files[])
 {
     int i;
@@ -2567,7 +2849,6 @@ static void ctl_pass_playing_list(int number_of_files, char *list_of_files[])
     int stdin_check;
 
     listwin=newwin(LIST_TITLE_LINES,COLS,TITLE_LINE,0);
-
     stdin_check = 0;
     act_number_of_files=0;
     for(i=0;i<number_of_files;i++){
@@ -2607,7 +2888,13 @@ static void ctl_pass_playing_list(int number_of_files, char *list_of_files[])
 		    i--;
 		else
 		{
-		    i = file_list.number;
+		    if(ctl.flags & CTLF_LIST_LOOP)
+			i = file_list.number;
+		    else
+		    {
+			ctl_reset();
+			break;
+		    }
 		    sleep(1);
 		}
 		nc_playfile=i;
@@ -2621,14 +2908,16 @@ static void ctl_pass_playing_list(int number_of_files, char *list_of_files[])
 		    i++;
 		else
 		{
-		    if(stdin_check)
+		    if(!(ctl.flags & CTLF_LIST_LOOP) || stdin_check)
 		    {
-			play_mode->flush_output();
+			aq_flush(0);
 			return;
 		    }
 		    i = 0;
 		    if(rc == RC_TUNE_END)
 			sleep(2);
+		    if(ctl.flags & CTLF_LIST_RANDOM)
+			shuffle_list();
 		}
 		nc_playfile=i;
 		ctl_list_mode(NC_LIST_NEW);
@@ -2653,15 +2942,38 @@ static void reset_indicator(void)
     memset(comment_indicator_buffer, ' ', indicator_width - 1);
     comment_indicator_buffer[indicator_width - 1] = '\0';
 
-    next_indicator_chan = -1;
     indicator_last_update = get_current_calender_time();
     indicator_mode = INDICATOR_DEFAULT;
     indicator_msgptr = NULL;
 
     for(i = 0; i < MAX_CHANNELS; i++)
     {
-	instr_comment[i].last_note_on = 0.0;
-	instr_comment[i].comm = channel_instrum_name(i);
+	ChannelStatus[i].last_note_on = 0.0;
+	ChannelStatus[i].comm = channel_instrum_name(i);
+    }
+}
+
+static void display_aq_ratio(void)
+{
+    static int last_rate = -1;
+    int rate, devsiz;
+
+    if((devsiz = aq_get_dev_queuesize()) <= 0)
+	return;
+    rate = (int)(((double)(aq_filled() + aq_soft_filled()) /
+		  devsiz) * 100 + 0.5);
+    if(rate > 9999)
+	rate = 10000;
+
+    if(last_rate != rate)
+    {
+	last_rate = rate;
+	wmove(dftwin, VOICE_LINE + 1, 34);
+	if(rate > 9999)
+	    wprintw(dftwin, " Audio queue:****%% ");
+	else
+	    wprintw(dftwin, " Audio queue:%4d%% ", rate);
+	scr_modified_flag = 1;
     }
 }
 
@@ -2672,9 +2984,9 @@ static void update_indicator(void)
     char c;
     static int play_modeflag = 1;
 
-#ifdef __WIN32__
+#ifdef __W32__
     play_modeflag = 1;
-	display_play_system(play_system_mode);
+    display_play_system(play_system_mode);
 #else
     if(midi_trace.flush_flag)
     {
@@ -2682,22 +2994,29 @@ static void update_indicator(void)
 	return;
     }
 
+    if(gslcd_displayed_flag)
+    {
+	t = get_current_calender_time();
+	if(t - gslcd_last_display_time > GS_LCD_CLEAR_TIME)
+	{
+	    ctl_lcd_mark(GS_LCD_MARK_CLEAR, 0, 0);
+	    gslcd_displayed_flag = 0;
+	}
+    }
+
     if(play_modeflag)
 	display_play_system(play_system_mode);
     else
 	display_play_system(-1);
     play_modeflag = !play_modeflag;
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
     t = get_current_calender_time();
     if(indicator_mode != INDICATOR_DEFAULT)
     {
-	int save_chan;
 	if(indicator_last_update + LYRIC_OUT_THRESHOLD > t)
 	    return;
-	save_chan = next_indicator_chan;
 	reset_indicator();
-	next_indicator_chan = save_chan;
     }
     indicator_last_update = t;
 
@@ -2706,57 +3025,41 @@ static void update_indicator(void)
 
     if(indicator_msgptr == NULL)
     {
-	if(next_indicator_chan >= 0 &&
-	   instr_comment[next_indicator_chan].comm != NULL &&
-	   *instr_comment[next_indicator_chan].comm)
+	int i, prog, first_ch;
+
+	first_ch = -1;
+	prog = ChannelStatus[current_indicator_chan].prog;
+	/* Find next message */
+	for(i = 0; i < MAX_CHANNELS; i++,
+	    current_indicator_chan = (current_indicator_chan + 1) % MAX_CHANNELS)
 	{
-	    current_indicator_chan = next_indicator_chan;
+	    if(ChannelStatus[current_indicator_chan].is_drum ||
+	       ChannelStatus[current_indicator_chan].comm == NULL ||
+	       *ChannelStatus[current_indicator_chan].comm == '\0')
+		continue;
+
+	    if(first_ch == -1 && 
+	       ChannelStatus[current_indicator_chan].last_note_on > 0)
+		first_ch = current_indicator_chan;
+	    if(ChannelStatus[current_indicator_chan].prog != prog &&
+	       (ChannelStatus[current_indicator_chan].last_note_on
+		+ CHECK_NOTE_SLEEP_TIME > t))
+		break;
 	}
-	else
+
+	if(i == MAX_CHANNELS)
 	{
-	    int prog, first_ch;
-
-	    prog = instr_comment[current_indicator_chan].prog;
-	    first_ch = -1;
-	    /* Find next message */
-	    for(i = 0; i < MAX_CHANNELS; i++)
-	    {
-		current_indicator_chan++;
-		if(current_indicator_chan == MAX_CHANNELS)
-		    current_indicator_chan = 0;
-
-		if(first_ch != -1 && 
-		   instr_comment[current_indicator_chan].last_note_on > 0)
-		    first_ch = current_indicator_chan;
-
-		if(instr_comment[current_indicator_chan].comm != NULL &&
-		   *instr_comment[current_indicator_chan].comm &&
-		   instr_comment[current_indicator_chan].prog != prog &&
-		   (instr_comment[current_indicator_chan].last_note_on
-		    + CHECK_NOTE_SLEEP_TIME > t ||
-		    instr_comment[current_indicator_chan].disp_cnt == 0))
-		    break;
-	    }
-
-	    if(i == MAX_CHANNELS)
-	    {
-		if(first_ch == -1)
-		    first_ch = 0;
-		current_indicator_chan = first_ch;
-	    }
+	    if(first_ch == -1)
+		first_ch = 0;
+	    if(ChannelStatus[first_ch].comm == NULL ||
+	       *ChannelStatus[first_ch].comm == '\0')
+		return;
+	    current_indicator_chan = first_ch;
 	}
-	next_indicator_chan = -1;
 
-	if(instr_comment[current_indicator_chan].comm == NULL ||
-	   *instr_comment[current_indicator_chan].comm == '\0')
-	    return;
-
-	i = instr_comment[current_indicator_chan].prog;
-	if(!IS_CURRENT_MOD_FILE)
-	    i += progbase;
 	snprintf(current_indicator_message, indicator_width, "%03d:%s   ",
-		i, instr_comment[current_indicator_chan].comm);
-	instr_comment[current_indicator_chan].disp_cnt++;
+		 ChannelStatus[current_indicator_chan].prog,
+		 ChannelStatus[current_indicator_chan].comm);
 	indicator_msgptr = current_indicator_message;
     }
 
@@ -2773,31 +3076,17 @@ static void update_indicator(void)
 
 static void indicator_chan_update(int ch)
 {
-    double t;
-
-    t = get_current_calender_time();
-    if(next_indicator_chan == -1 &&
-       instr_comment[ch].last_note_on + CHECK_NOTE_SLEEP_TIME < t)
-	next_indicator_chan = ch;
-    instr_comment[ch].last_note_on = t;
-    instr_comment[ch].disp_cnt = 0;
-    if(instr_comment[ch].comm == NULL)
+    ChannelStatus[ch].last_note_on = get_current_calender_time();
+    if(ChannelStatus[ch].comm == NULL)
     {
-	if((instr_comment[ch].comm = default_instrument_name) == NULL)
+	if((ChannelStatus[ch].comm = default_instrument_name) == NULL)
 	{
-	    if(!ISDRUMCHANNEL(ch))
-		instr_comment[ch].comm = "<GrandPiano>";
+	    if(ChannelStatus[ch].is_drum)
+		ChannelStatus[ch].comm = "<Drum>";
 	    else
-		instr_comment[ch].comm = "<Drum>";
+		ChannelStatus[ch].comm = "<GrandPiano>";
 	}
     }
-}
-
-static void indicator_set_prog(int ch, int val, char *comm)
-{
-    instr_comment[ch].comm = comm;
-    instr_comment[ch].prog = val;
-    instr_comment[ch].last_note_on = 0.0;
 }
 
 static void display_lyric(char *lyric, int sep)
@@ -2936,12 +3225,11 @@ static void display_lyric(char *lyric, int sep)
   */
 #include <sys/types.h>
 #include <sys/stat.h>
-#ifdef HAVE_FCNTL_H
-#include <fcntl.h>
-#endif /* HAVE_FCNTL_H */
+
 #ifndef S_ISDIR
 #define S_ISDIR(mode)   (((mode)&0xF000) == 0x4000)
 #endif /* S_ISDIR */
+
 /* Allocate new buffer */
 static MiniBuffer *mini_buff_new(int size)
 {
@@ -3221,7 +3509,6 @@ static MFnode *MFnode_insert_node(MFnode *list, MFnode *node)
     return list;
 }
 
-
 /* Completion as file name */
 static int mini_buff_completion(MiniBuffer *b)
 {
@@ -3244,7 +3531,7 @@ static int mini_buff_completion(MiniBuffer *b)
     pr = text;
     for(;;)
     {
-	pr = strchr(pr, PATH_SEP);
+	pr = pathsep_strchr(pr);
 	if(pr == NULL)
 	    break;
 	pr++;
@@ -3252,11 +3539,12 @@ static int mini_buff_completion(MiniBuffer *b)
 	if(*pr == '~')
 	    break;
 #endif /* TILD_SCHEME_ENABLE */
-	if(*pr == PATH_SEP)
+	if(IS_PATH_SEP(*pr))
 	{
 	    do
 		pr++;
-	    while(*pr == PATH_SEP);
+	    while(IS_PATH_SEP(*pr))
+		;
 	    pr--;
 	    break;
 	}
@@ -3283,7 +3571,7 @@ static int mini_buff_completion(MiniBuffer *b)
     b->cflag = 0;
 
     /* split dir and file name */
-    if((file = strrchr(text, PATH_SEP)) != NULL)
+    if((file = pathsep_strrchr(text)) != NULL)
     {
 	file++;
 	dirlen = file - text;

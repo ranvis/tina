@@ -1,5 +1,5 @@
 # TiMidity++ -- MIDI to WAVE converter and player
-# Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+# Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
 # Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 #
 # This program is free software; you can redistribute it and/or modify
@@ -14,18 +14,18 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 include $(top_builddir)/common.makefile
+
+SUFFIXES = .ptcl .tcl .@so@
 
 SUBDIRS = motif_bitmaps bitmaps pixmaps
 
 INCLUDES = \
-	-I$(top_srcdir) \
 	-I$(top_srcdir)/timidity \
 	-I$(top_srcdir)/libarc \
-	-I$(top_srcdir)/utils \
-	$(EXTRAINCS)
+	-I$(top_srcdir)/utils
 
 noinst_LIBRARIES = libinterface.a
 
@@ -49,12 +49,15 @@ EXTRA_libinterface_a_SOURCES = \
 	xaw.h \
 	xaw_c.c \
 	xaw_i.c \
+	xaw_redef.c \
 	xskin.h \
 	xskin_c.c \
 	xskin_i.c \
 	xskin_loadBMP.c \
 	xskin_spectrum.c \
 	wrdt_x.c \
+	x_sherry.c \
+	x_sherry.h \
 	x_wrdwindow.c \
 	x_wrdwindow.h \
 	VTPrsTbl.c \
@@ -70,74 +73,54 @@ EXTRA_libinterface_a_SOURCES = \
 	mac_wrdwindow.c \
 	mac_wrdwindow.h \
 	wrdt_mac.c \
-	wrdt_wincon.c \
+	wrdt_wcon.c \
 	gtk_c.c \
 	gtk_h.h \
 	gtk_i.c \
 	gtk_p.c \
 	soundspec.c \
-	soundspec.h
-
-if ENABLE_NCURSES
-NCURSES_OBJS = ncurs_c.o
-endif
-
-if ENABLE_SLANG
-SLANG_OBJS = slang_c.o
-endif
-
-if ENABLE_MOTIF
-MOTIF_OBJS = \
-	motif_c.o \
-	motif_i.o \
-	motif_p.o 
-endif
-
-if ENABLE_TCLTK
-TK_OBJS = tk_c.o
-endif
-
-if ENABLE_EMACS
-EMACS_OBJS = emacs_c.o
-endif
-
-if ENABLE_VT100
-VT100_OBJS = \
-	vt100.o \
-	vt100_c.o
-endif
-
-if ENABLE_XAW
-XAW_OBJS = \
-	xaw_c.o \
-	xaw_i.o
-endif
-
-if ENABLE_XSKIN
-XSKIN_OBJS = \
-	xskin_c.o \
-	xskin_i.o \
-	xskin_loadBMP.o \
-	xskin_spectrum.o
-endif
-
-if ENABLE_GTK
-GTK_OBJS= \
-	gtk_c.o \
-	gtk_i.o \
-	gtk_p.o
-endif
+	soundspec.h \
+	x_sherry.c \
+	x_sherry.h \
+	check.xbm \
+	arrow.xbm \
+	on.xbm \
+	off.xbm \
+	server_c.c \
+	server_defs.h \
+	alsaseq_c.c \
+	w32g.h \
+	w32g_c.c \
+	w32g_ini.c \
+	w32g_rec.h \
+	w32g_res.h \
+	w32g_res.rc \
+	w32g_utl.c \
+	w32g_utl.h \
+	w32g_ut2.c \
+	w32g_ut2.h \
+	w32g_i.c \
+	w32g_playlist.c \
+	w32g_pref.c \
+	w32g_pref.h \
+	w32g_subwin.c \
+	w32g_subwin.h \
+	w32g_btn.bmp \
+	w32g_icon.ico \
+	w32g_sleep.bmp \
+	w32g_subbtn.bmp
 
 if ENABLE_WRD
 WRD_OBJS = \
 	wrdt_x.o \
 	x_wrdwindow.o \
 	VTPrsTbl.o \
-	x_mag.o
+	x_mag.o \
+	x_sherry.o
 endif
 
 if CYGNUS
-WRD_WINCON_OBJS = wrdt_wincon.o
+WRD_WINCON_OBJS = wrdt_wcon.o
 endif
 
 if NEEDDLOPEN
@@ -149,25 +132,30 @@ SOUND_SPEC_OBJS = \
 	soundspec.o
 endif
 
+if ENABLE_W32GUI
+W32GUI_DEPS = w32g_res.res
+endif
+
+INTERFACE_OBJS = $(INTERFACE_SRCS:.c=.o)
+
 libinterface_a_LIBADD = \
-	$(NCURSES_OBJS) \
-	$(SLANG_OBJS) \
-	$(MOTIF_OBJS) \
-	$(TK_OBJS) \
-	$(EMACS_OBJS) \
-	$(VT100_OBJS) \
-	$(XAW_OBJS) \
-	$(XSKIN_OBJS) \
-	$(GTK_OBJS) \
+	$(INTERFACE_OBJS) \
 	$(WRD_OBJS) \
 	$(WRD_WINCON_OBJS) \
 	$(DYNAMIC_OBJS) \
 	$(SOUND_SPEC_OBJS)
 
-libinterface_a_DEPENDENCIES = \
-	$(top_srcdir)/interface.h \
+libinterface_dep = \
+	$(top_builddir)/interface.h \
 	$(libinterface_a_LIBADD) \
-	$(tcltk_dep)
+	$(tcltk_dep) \
+	$(W32GUI_DEPS)
+
+libinterface.a: $(libinterface_a_OBJECTS) $(libinterface_a_DEPENDENCIES) $(libinterface_dep)
+	-rm -f libinterface.a
+	$(AR) cru libinterface.a $(libinterface_a_OBJECTS) $(libinterface_a_LIBADD)
+	$(RANLIB) libinterface.a
+
 
 # Tcl interface sources
 TCLSRCS = tkmidity.ptcl tkpanel.tcl browser.tcl misc.tcl
@@ -181,19 +169,25 @@ EXTRA_DIST = \
 	browser.tcl \
 	misc.tcl \
 	timidity.el \
-	check.xbm \
-	arrow.xbm \
-	on.xbm \
-	off.xbm
+	tclIndex \
+	interface_T.txt \
+	interface_a.txt \
+	interface_e.txt \
+	interface_g.txt \
+	interface_i.txt \
+	interface_m.txt \
+	interface_n.txt \
+	interface_s.txt
 
 .ptcl.tcl:
-	sed -e s@%TCL_DIR%@$(TCL_DIR)@g -e s@%TIMID_DIR%@$(TIMID_DIR)@g  $< > $@
+	sed -e 's@%TCL_DIR%@$(TCL_DIR)@g' $< > $@
 clean:
 	rm -f tkmidity.tcl
 	rm -f *.o
 	rm -f *.$(so)
 
-tclIndex: $(TCLF)
+tclIndex: $(TCLSRCS)
+	rm -f tclIndex
 	echo 'auto_mkindex . *.tcl; exit' | $(WISH)
 
 if ENABLE_TCLTK
@@ -226,13 +220,25 @@ install_el = install.el
 endif
 
 install.el: $(ELFILES)
-	test -d $(DESTDIR)$(TIMID_DIR) || mkdir -p $(DESTDIR)$(TIMID_DIR)
-	for f in $(ELFILES) ''; do case ".$$f" in .);; *) $(INSTALL_DATA) $$f $(DESTDIR)$(TIMID_DIR);; esac; done
+	test -d $(DESTDIR)$(ELISP_DIR) || mkdir -p $(DESTDIR)$(ELISP_DIR)
+	for f in $(ELFILES) ''; do case ".$$f" in .);; *) $(INSTALL_DATA) $$f $(DESTDIR)$(ELISP_DIR);; esac; done
 
+w32g_res.res: w32g_res.h w32g_rec.h w32g_res.rc \
+	w32g_btn.bmp w32g_icon.ico w32g_sleep.bmp w32g_subbtn.bmp
+	windres -o $@ -O coff w32g_res.rc
 
-##
-## For dynamic interfaces
-##
+## This needs to build japanese resource.
+#BRCC32 = c:/borland/bcc55/bin/brcc32.exe
+#BRCC32_FLAGS = -ic:/mingw/include
+#w32g_res.res: w32g_res.h w32g_rec.h w32g_res.rc \
+#	w32g_btn.bmp w32g_icon.ico w32g_sleep.bmp w32g_subbtn.bmp
+#	$(BRCC32) $(BRCC32_FLAGS) w32g_res.rc
+#	windres -o tmp.res -O coff w32g_res.RES
+#	mv tmp.res w32g_res.res
+
+###
+### For dynamic interfaces
+###
 
 if NEEDDLOPEN
 dynamic_targets = @dynamic_targets@
@@ -250,7 +256,8 @@ g_so_libs = @g_so_libs@
 all-am: $(dynamic_targets)
 
 install.dynamics: $(dynamic_targets)
-	for f in $(dynamic_targets) ''; do case ".$$f" in .);; *) $(INSTALL_PROGRAM) $$f $(DESTDIR)$(TIMID_DIR);; esac; done
+	test -d $(DESTDIR)$(SHLIB_DIR) || mkdir -p $(DESTDIR)$(SHLIB_DIR)
+	for f in $(dynamic_targets) ''; do case ".$$f" in .);; *) $(INSTALL_PROGRAM) $$f $(DESTDIR)$(SHLIB_DIR);; esac; done
 
 .c.$(so):
 	$(COMPILE) $(SHCFLAGS) -c $< -o $@
@@ -294,10 +301,18 @@ interface_i.$(so): xskin_c.$(so) support.$(so) xskin_i.$(so) xskin_loadBMP.$(so)
 interface_g.$(so): gtk_c.$(so) support.$(so) gtk_i.$(so) gtk_p.$(so)
 	$(SHLD) -o $@ gtk_c.$(so) support.$(so) gtk_i.$(so) gtk_p.$(so) $(g_so_libs)
 
+interface_r.$(so): server_c.$(so) support.$(so)
+	$(SHLD) -o $@ server_c.$(so) support.$(so)
+
+interface_A.$(so): alsaseq_c.$(so) support.$(so)
+	$(SHLD) -o $@ alsaseq_c.$(so) support.$(so)
+
 endif
 
 clean-compile:
 	-rm -f *.$(so)
+	-rm -f *.res
+	-rm -f *.RES
 
 install-exec-local: $(install_tk) $(install_xaw) $(install_el) $(install_dynamics)
 ########## End of Makefile

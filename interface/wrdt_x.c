@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     wrdt_x.c - WRD Tracer for X Window
 
@@ -43,13 +42,20 @@
 #include "wrd.h"
 #include "x_wrdwindow.h"
 #include "x_mag.h"
+#ifdef ENABLE_SHERRY
+#include "x_sherry.h"
+#endif /* ENABLE_SHERRY */
+
 
 static int wrdt_open(char *dummy);
 static void wrdt_apply(int cmd, int wrd_argc, int wrd_argv[]);
 static void wrdt_update_events(void);
-static void wrdt_start(int wrdflag);
+static int wrdt_start(int wrd_mode);
 static void wrdt_end(void);
 static void wrdt_close(void);
+static int current_wrd_mode = WRD_TRACE_NOTHING;
+static char *save_open_flag;
+
 #define wrdt x_wrdt_mode
 
 WRDTracer wrdt =
@@ -58,6 +64,11 @@ WRDTracer wrdt =
     0,
     wrdt_open,
     wrdt_apply,
+#ifdef ENABLE_SHERRY
+    x_sry_wrdt_apply,
+#else
+    NULL,
+#endif
     wrdt_update_events,
     wrdt_start,
     wrdt_end,
@@ -66,30 +77,72 @@ WRDTracer wrdt =
 
 static int inkey_flag;
 #define LINEBUF 1024
-static char file_buf[LINEBUF];
-static char *fakeargv[]={"timidity",NULL};
+static char line_buf[LINEBUF];
 
 static int wrdt_open(char *arg)
 {
-  int error=0;
-  wrdt.opened = 1;
-  inkey_flag = 0;
-  fakeargv[1]=arg;
-  error=InitWin(2,fakeargv);
-  return error;
+    save_open_flag = arg;
+    wrdt.opened = 1;
+    return 0;
 }
 
 static void wrdt_update_events(void)
 {
-  WinEvent();
+    if(current_wrd_mode == WRD_TRACE_MIMPI)
+	WinEvent();
+#ifdef ENABLE_SHERRY
+    else if(current_wrd_mode == WRD_TRACE_SHERRY)
+	x_sry_event();
+#endif
 }
 
-static void wrdt_start(int wrdflag)
+static int wrdt_start(int mode)
 {
-    if(wrdflag)
-	OpenWRDWindow();
-    else
-	CloseWRDWindow();
+    int last_mode = current_wrd_mode;
+
+    current_wrd_mode = mode;
+    switch(mode)
+    {
+      case WRD_TRACE_NOTHING:
+	switch(last_mode)
+	{
+	  case WRD_TRACE_MIMPI:
+	    CloseWRDWindow();
+	    break;
+	  case WRD_TRACE_SHERRY:
+#ifdef ENABLE_SHERRY
+	    CloseSryWindow();
+#endif /* ENABLE_SHERRY */
+	    break;
+	}
+	break;
+
+      case WRD_TRACE_MIMPI:
+#ifdef ENABLE_SHERRY
+	if(last_mode == WRD_TRACE_SHERRY)
+	    CloseSryWindow();
+#endif /* ENABLE_SHERRY */
+	  if(OpenWRDWindow(save_open_flag) == -1)
+	  {
+	      current_wrd_mode = WRD_TRACE_NOTHING;
+	      return -1; /* Error */
+	  }
+	break;
+
+      case WRD_TRACE_SHERRY:
+	if(last_mode == WRD_TRACE_MIMPI)
+	    CloseWRDWindow();
+#ifdef ENABLE_SHERRY
+	if(OpenSryWindow(save_open_flag) == -1)
+	{
+	    current_wrd_mode = WRD_TRACE_NOTHING;
+	    return -1; /* Error */
+	}
+#endif /* ENABLE_SHERRY */
+	break;
+    }
+
+    return 0;
 }
 
 static void wrdt_end(void)
@@ -101,8 +154,15 @@ static void wrdt_end(void)
 
 static void wrdt_close(void)
 {
-    wrdt.opened = 0;
-    inkey_flag = 0;
+    if(wrdt.opened)
+    {
+	EndWin();
+#ifdef ENABLE_SHERRY
+	x_sry_close();
+#endif /* ENABLE_SHERRY */
+	wrdt.opened = 0;
+	inkey_flag = 0;
+    }
 }
 
 static char *wrd_event2string(int id)
@@ -138,7 +198,7 @@ static void print_ecmd(char *cmd, int *args, int narg)
 	narg--;
     }
     strcat(p, ")");
-    ctl->cmsg(CMSG_INFO, VERB_NOISY, "%s", p);
+    ctl->cmsg(CMSG_INFO, VERB_DEBUG, "%s", p);
     reuse_mblock(&tmpbuffer);
 }
 
@@ -177,7 +237,7 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
     char *p;
     char *text;
     int i, len;
-    static txtclr_preserve=0;
+    static int txtclr_preserve=0;
 
     if(cmd == WRD_MAGPRELOAD){
 	/* Load MAG file */
@@ -186,7 +246,7 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	ctl->cmsg(CMSG_INFO, VERB_NOISY, "Loading magfile: [%s]", p);
 	m = mag_create(p);
 	if(m == NULL)
-	    ctl->cmsg(CMSG_INFO, VERB_NOISY, "Can't load magfile: %s", p);
+	    ctl->cmsg(CMSG_WARNING, VERB_NOISY, "Can't load magfile: %s", p);
 	else
 	{
 	    ctl->cmsg(CMSG_INFO, VERB_DEBUG, "MAG %s: [%d,%d,%d,%d]",
@@ -223,8 +283,8 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
       case WRD_COLOR:
 	txtclr_preserve=wrd_args[0];
 	/*This length is at most 20 ; this is much lesser than LINEBUF*/
-	snprintf(file_buf,LINEBUF,"\033[%dm", txtclr_preserve);
-	AddLine(file_buf,0);
+	snprintf(line_buf,LINEBUF,"\033[%dm", txtclr_preserve);
+	AddLine(line_buf,0);
 	break;
       case WRD_END: /* Never call */
 	break;
@@ -234,23 +294,23 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	break;
       case WRD_EXEC:
 	/*I don't spawn another program*/
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@EXEC(%s)", wrd_event2string(wrd_args[0]));
 	break;
       case WRD_FADE:
-	x_Fade(wrd_args,wrd_argc-1,-1,-1);
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@FADE(%d,%d,%d)", wrd_args[0], wrd_args[1], wrd_args[2]);
+	x_Fade(wrd_args,wrd_argc-1,-1,-1);
 	break;
       case WRD_FADESTEP:
-	x_Fade(NULL,0,wrd_args[0],wrd_args[1]);
 #if 0
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@FADESTEP(%d/%d)", wrd_args[0], wrd_args[1]);
 #endif
+	x_Fade(NULL,0,wrd_args[0],wrd_args[1]);
 	break;
       case WRD_GCIRCLE:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GCIRCLE(%d,%d,%d,%d,%d,%d)",
 		  wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3],
 		  wrd_args[4], wrd_args[5]);
@@ -260,10 +320,10 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	x_Gcls(wrd_args[0]);
 	break;
       case WRD_GINIT:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY, "@GINIT()");
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG, "@GINIT()");
 	break;
       case WRD_GLINE:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GLINE(%d,%d,%d,%d,%d,%d,%d)",
 	       wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3], wrd_args[4],
 	       wrd_args[5], wrd_args[6]);
@@ -271,12 +331,12 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	x_Gline(wrd_args,wrd_argc-1);
 	break;
       case WRD_GMODE:
-	x_GMode(wrd_args[0]);
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GMODE(%d)", wrd_args[0]);
+	x_GMode(wrd_args[0]);
 	break;
       case WRD_GMOVE:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GMOVE(%d,%d,%d,%d,%d,%d,%d,%d,%d)",
 	       wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3], wrd_args[4],
 	       wrd_args[5], wrd_args[6], wrd_args[7], wrd_args[8]);
@@ -288,26 +348,27 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 		wrd_args[6], wrd_args[7], wrd_args[8]);
 	break;
       case WRD_GON:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GON(%d)", wrd_args[0]);
+	x_Gon(wrd_args[0]);
 	break;
       case WRD_GSCREEN:
-	x_Gscreen(wrd_args[0],wrd_args[1]);
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@GSCREEN(%d,%d)", wrd_args[0], wrd_args[1]);
+	x_Gscreen(wrd_args[0],wrd_args[1]);
 	break;
       case WRD_INKEY:
 	inkey_flag = 1;
-	ctl->cmsg(CMSG_INFO, VERB_NOISY, "@INKEY - begin");
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG, "@INKEY - begin");
 	break;
       case WRD_OUTKEY:
 	inkey_flag = 0;
-	ctl->cmsg(CMSG_INFO, VERB_NOISY, "@INKEY - end");
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG, "@INKEY - end");
 	break;
       case WRD_LOCATE:
 	/*Length is At most 40*/
-	snprintf(file_buf,LINEBUF,"\033[%d;%dH", wrd_args[1], wrd_args[0]);
-	AddLine(file_buf,0);
+	snprintf(line_buf,LINEBUF,"\033[%d;%dH", wrd_args[1], wrd_args[0]);
+	AddLine(line_buf,0);
 	break;
       case WRD_LOOP: /* Never call */
 	break;
@@ -326,7 +387,7 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 		sprintf(p + strlen(p), "%d,", wrd_args[i]);
 	    }
 	  sprintf(p + strlen(p), "%d,%d)", wrd_args[3], wrd_args[4]);
-	  ctl->cmsg(CMSG_INFO, VERB_NOISY, "%s", p);
+	  ctl->cmsg(CMSG_INFO, VERB_DEBUG, "%s", p);
 	  m=mag_search(wrd_event2string(wrd_args[0]));
 	  if(m!=NULL){
 	    x_Mag(m,wrd_args[1],wrd_args[2],wrd_args[3],wrd_args[4]);
@@ -342,21 +403,21 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	x_Pal(wrd_args,wrd_argc-1);
 	break;
       case WRD_PALCHG:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@PALCHG(%s)", wrd_event2string(wrd_args[0]));
 	break;
       case WRD_PALREV:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@PALREV(%d)", wrd_args[0]);
 	x_Palrev(wrd_args[0]);
 	break;
       case WRD_PATH:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@PATH(%s)", wrd_event2string(wrd_args[0]));
 	wrd_add_path(wrd_event2string(wrd_args[0]), 0);
 	break;
       case WRD_PLOAD:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@PLOAD(%s)", wrd_event2string(wrd_args[0]));
 	x_PLoad(wrd_event2string(wrd_args[0]));
 	break;
@@ -365,11 +426,11 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	len = strlen(p);
 	text = (char *)new_segment(&tmpbuffer, SAFE_CONVERT_LENGTH(len));
 	code_convert(p, text, SAFE_CONVERT_LENGTH(len), NULL, NULL);
-	ctl->cmsg(CMSG_INFO, VERB_NOISY, "@REM %s", text);
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG, "@REM %s", text);
 	reuse_mblock(&tmpbuffer);
 	break;
       case WRD_REMARK:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@REMARK(%s)", wrd_event2string(wrd_args[0]));
 	break;
       case WRD_REST: /* Never call */
@@ -377,22 +438,26 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
       case WRD_SCREEN: /* Not supported */
 	break;
       case WRD_SCROLL:
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@SCROLL(%d,%d,%d,%d,%d,%d,%d)",
 		  wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3],
 		  wrd_args[4], wrd_args[5], wrd_args[6]);
 	break;
       case WRD_STARTUP:
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
+		  "@STARTUP(%d)", wrd_args[0]);
 	wrd_init_path();
 	inkey_flag = 0;
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
-		  "@STARTUP(%d)", wrd_args[0]);
 	x_Startup(wrd_args[0]);
 	load_default_graphics(current_file_info->filename);
 	break;
       case WRD_STOP: /* Never call */
 	break;
       case WRD_TCLS:
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
+		  "@TCLS(%d,%d,%d,%d,%d,%d)",
+		  wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3],
+		  wrd_args[4], wrd_args[5]);
 	{
 	  char fillbuf[1024];
 	  int xdiff;
@@ -413,9 +478,9 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	  memset(fillbuf,wrd_args[5],xdiff);/*X2-X1*/
 	  fillbuf[xdiff]=0;
 	  for(i=wrd_args[1];i<=wrd_args[3];i++){/*Y1 to Y2*/
-	    snprintf(file_buf,LINEBUF,"\033[%d;%dH",i,wrd_args[0]);
+	    snprintf(line_buf,LINEBUF,"\033[%d;%dH",i,wrd_args[0]);
 /*X1to....*/
-	    AddLine(file_buf,0);
+	    AddLine(line_buf,0);
 	    AddLine(fillbuf,0);
 	  }
 	  fillbuf[0]=0x1b;
@@ -424,15 +489,11 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	  fillbuf[3]=0;
 	  AddLine(fillbuf,0);
 	}
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
-		  "@TCLS(%d,%d,%d,%d,%d,%d)",
-		  wrd_args[0], wrd_args[1], wrd_args[2], wrd_args[3],
-		  wrd_args[4], wrd_args[5]);
 	break;
       case WRD_TON:
-	x_Ton(wrd_args[0]);
-	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+	ctl->cmsg(CMSG_INFO, VERB_DEBUG,
 		  "@TON(%d)", wrd_args[0]);
+	x_Ton(wrd_args[0]);
 	break;
       case WRD_WAIT: /* Never call */
 	break;
@@ -456,7 +517,6 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 	print_ecmd("LINE", wrd_args, 1);
 	break;
       case WRD_ePAL:
-
 	print_ecmd("PAL", wrd_args, 2);
 	break;
       case WRD_eREGSAVE:
@@ -497,11 +557,26 @@ static void wrdt_apply(int cmd, int wrd_argc, int wrd_args[])
 
 	/* Extensionals */
       case WRD_START_SKIP:
-	x_RedrawControl(0);
+	if(current_wrd_mode == WRD_TRACE_MIMPI)
+	    x_RedrawControl(0);
+#ifdef ENABLE_SHERRY
+	else if(current_wrd_mode == WRD_TRACE_SHERRY)
+	    x_sry_redraw_ctl(0);
+#endif /* ENABLE_SHERRY */
 	break;
       case WRD_END_SKIP:
-	x_RedrawControl(1);
+	if(current_wrd_mode == WRD_TRACE_MIMPI)
+	    x_RedrawControl(1);
+#ifdef ENABLE_SHERRY
+	else if(current_wrd_mode == WRD_TRACE_SHERRY)
+	    x_sry_redraw_ctl(1);
+#endif /* ENABLE_SHERRY */
 	break;
+#ifdef ENABLE_SHERRY
+      case WRD_SHERRY_UPDATE:
+	x_sry_update();
+	break;
+#endif /* ENABLE_SHERRY */
     }
     WinFlush();
 }

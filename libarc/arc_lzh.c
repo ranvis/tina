@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
@@ -12,8 +32,14 @@
 #include "arc.h"
 
 #define boolean int
-#define FALSE 0
-#define TRUE 1
+
+#ifndef FALSE
+# define FALSE 0
+#endif
+
+#ifndef TRUE
+# define TRUE 1
+#endif
 
 #define DELIM ('/')
 #define DELIM2 (0xff)
@@ -203,7 +229,7 @@ static unsigned char *convdelim(unsigned char *path, unsigned char delim)
     return path;
 }
 
-ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
+ArchiveEntryNode *next_lzh_entry(void)
 {
     ArchiveEntryNode *entry;
     URL url;
@@ -222,12 +248,13 @@ ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
     int macbin_check;
     extern char *lzh_methods[];
 
-    url = archiver->decode_stream;
-    macbin_check = (archiver->nfiles == 0);
+    url = arc_handler.url;
+    macbin_check = (arc_handler.counter == 0);
 
   retry_read:
     dir_length = 0;
     name_length = 0;
+#if 0
     if((header_size = url_getc(url)) == EOF)
 	return NULL;
     if(header_size == 0)
@@ -236,8 +263,8 @@ ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
 	{
 	    macbin_check = 0;
 	    url_skip(url, 128-1);
-	    if(archiver->type == AHANDLER_SEEK)
-		archiver->pos += 128;
+	    if(arc_handler.isfile)
+		arc_handler.pos += 128;
 	    goto retry_read;
 	}
 	return NULL;
@@ -247,6 +274,44 @@ ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
     if(url_read(url, data + I_HEADER_CHECKSUM,
 		header_size - 1) < header_size - 1)
 	return NULL;
+#else	/* a little cleverer lzh check */
+	if(macbin_check){
+/*	for(i=0;i<LZHEADER_STRAGE;i++){ */
+	for(i=0;i<1024;i++){
+		if((header_size = url_getc(url)) == EOF)
+			return NULL;
+		*(data + i) = header_size;
+		if(i >= 6){
+			if(*(data + i - 4) == '-'
+				&& *(data + i - 3) == 'l'
+				&& *(data + i - 2) == 'h'
+				&& *(data + i - 0) == '-')
+			{
+				int j;
+				if(arc_handler.isfile)
+					arc_handler.pos += i - 6;
+				for(j = 0; j<= 6; j++)
+					*(data + j) = *(data + i - 6 + j);
+				header_size = (int)(unsigned char)(*(data + i - 6));
+				if(header_size == 0)
+					return NULL;
+				if(url_read(url, data + 7, header_size - 7) < header_size - 7)
+					return NULL;
+				break;
+			}
+		}
+	}
+	if(i >= LZHEADER_STRAGE)
+		return NULL;
+	} else {
+	    if((header_size = url_getc(url)) == EOF)
+			return NULL;
+		if(url_read(url, data + I_HEADER_CHECKSUM,
+			header_size - 1) < header_size - 1)
+		return NULL;
+	}
+    macbin_check = 0;
+#endif
     hdrsiz = header_size;
     setup_get(data + I_HEADER_LEVEL);
     header_level = get_byte();
@@ -447,8 +512,8 @@ ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
   parse_ok:
     if(strncmp("-lhd-", method_id, 5) == 0)
     {
-	if(archiver->type == AHANDLER_SEEK)
-	    archiver->pos += hdrsiz;
+	if(arc_handler.isfile)
+	    arc_handler.pos += hdrsiz;
 	goto retry_read; /* Skip directory entry */
     }
 
@@ -457,38 +522,30 @@ ArchiveEntryNode *next_lzh_entry(ArchiveHandler archiver)
 	    break;
     if(!lzh_methods[i])
 	return NULL;
-    entry = new_entry_node(&archiver->pool, filename, name_length);
+    entry = new_entry_node(filename, name_length);
     if(entry == NULL)
 	return NULL;
     entry->comptype = i + ARCHIVEC_LZHED + 1;
     entry->compsize = compsize;
     entry->origsize = origsize;
 
-    if(archiver->type == AHANDLER_SEEK)
+    if(arc_handler.isfile)
     {
-	entry->strmtype = ARCSTRM_SEEK_URL;
-	archiver->pos += hdrsiz;
-	entry->u.seek_start = archiver->pos;
+	arc_handler.pos += hdrsiz;
+	entry->start = arc_handler.pos;
+	entry->cache = NULL;
 	url_skip(url, compsize);
-	archiver->pos += compsize;
+	arc_handler.pos += compsize;
     }
     else
     {
-	char buff[BUFSIZ];
-	long rest, n;
-
-	entry->strmtype = ARCSTRM_MEMBUFFER;
-	rest = compsize;
-	while(rest > 0)
+      long n;
+      entry->start = 0;
+      entry->cache = url_dump(url, compsize, &n);
+      if(n != compsize)
 	{
-	    n = rest;
-	    if(n > sizeof(buff))
-		n = sizeof(buff);
-	    n = url_read(url, buff, n);
-	    if(n <= 0)
-		break;
-	    push_memb(&entry->u.compdata, buff, n);
-	    rest -= n;
+	  free_entry_node(entry);
+	  return NULL;
 	}
     }
     return entry;

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 */
 
@@ -71,7 +70,7 @@ static void wrdt_update_events(void);
 static void wrdt_end(void);
 static void wrdt_close(void);
 #define NO_GRAPHIC_SUPPORT
-#define wrdt wincon_wrdt_mode
+#define wrdt wcon_wrdt_mode
 #define COLOR_REMAP(k) ((k)>16)&&((k)<30)?(k)+14:k
 
 WRDTracer wrdt =
@@ -80,6 +79,7 @@ WRDTracer wrdt =
     0,
     wrdt_open,
     wrdt_apply,
+    NULL,
     wrdt_update_events,
     NULL,
     wrdt_end,
@@ -756,7 +756,7 @@ static void borlandc_esc(char *str)
 	char local[201];
 	local[0] = '\033';
 	local[1] = '[';
-	strncpy(local+2,str,200-2);
+	strncpy(local+2,str,sizeof(local)-3);
 	local[200] = '\0';
 	putstring_with_esc(local);
 }

@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifndef ___URL_H_
 #define ___URL_H_
 
@@ -6,7 +26,8 @@
  * http://www.goice.co.jp/member/mo/release/index.html#liburl
  */
 
-#define URL_LIB_VERSION "1.8.8"
+
+#define URL_LIB_VERSION "1.9.5"
 
 /* Define if you want to enable pipe command scheme ("command|") */
 #define PIPE_SCHEME_ENABLE
@@ -14,7 +35,7 @@
 /* Define if you want to appended on a user's home directory if a filename
  * is beginning with '~'
  */
-#if !defined(__MACOS__) && !defined(__WIN32__)
+#if !defined(__MACOS__) && !defined(__W32__)
 #define TILD_SCHEME_ENABLE
 #endif
 
@@ -41,8 +62,11 @@ typedef struct _URL
     unsigned long nread;	/* Reset in url_seek, url_rewind,
 				   url_set_readlimit */
     unsigned long readlimit;
+    int		  eof;		/* Used in url_nread and others */
 } *URL;
 #define URLm(url, m) (((URL)url)->m)
+
+#define url_eof(url) URLm((url), eof)
 
 /* open URL stream */
 extern URL url_open(char *url_string);
@@ -69,7 +93,7 @@ extern int url_readline(URL url, char *buff, int n);
 /* read a byte */
 extern int url_fgetc(URL url);
 #define url_getc(url) \
-    ((url)->nread >= (url)->readlimit ? EOF : \
+    ((url)->nread >= (url)->readlimit ? ((url)->eof = 1, EOF) : \
      (url)->url_fgetc != NULL ? ((url)->nread++, (url)->url_fgetc(url)) : \
       url_fgetc(url))
 
@@ -84,6 +108,9 @@ extern void url_skip(URL url, long n);
 
 /* seek to first position */
 extern void url_rewind(URL url);
+
+/* dump */
+void *url_dump(URL url, long nbytes, long *real_read);
 
 /* set read limit */
 void url_set_readlimit(URL url, long readlimit);
@@ -190,8 +217,8 @@ enum url_types
     URL_hqxdecode_t,		/* HQX decoder */
     URL_cgi_escape_t,		/* WWW CGI Escape */
     URL_cgi_unescape_t,		/* WWW CGI Unescape */
+    URL_arc_t,			/* arc stream */
 
-    URL_arc_stream_t = 98,	/* arc stream */
     URL_inflate_t = 99,		/* LZ77 decode stream */
 
     URL_extension_t = 100	/* extentional stream >= 100 */

@@ -1,3 +1,23 @@
+/*
+    TiMidity++ -- MIDI to WAVE converter and player
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif /* HAVE_CONFIG_H */
@@ -8,9 +28,9 @@
 #else
 #include <strings.h>
 #endif
-#ifndef __WIN32__
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif /* __WIN32__ */
+#endif /* HAVE_UNISTD_H */
 #include <signal.h> /* for SIGALRM */
 
 #include "timidity.h"
@@ -135,7 +155,7 @@ URL url_ftp_open(char *name)
     char *p, *host, *path;
     unsigned short port;
     char buff[BUFSIZ];
-    char path_buff[1024];
+    char path_buff[1024], host_buff[1024];
     int n;
     char *passwd;
     char *user;
@@ -182,7 +202,11 @@ URL url_ftp_open(char *name)
 	    name += 6;
 	strncpy(buff, name, sizeof(buff));
 	buff[sizeof(buff) - 1] = '\0';
-	host = buff;
+
+	strncpy(host_buff, buff, sizeof(host_buff));
+	host_buff[sizeof(host_buff) - 1] = '\0';
+	host = host_buff;
+
 	if((p = strchr(host, '/')) == NULL)
 	{
 	    url_ftp_close((URL)url);
@@ -214,7 +238,7 @@ URL url_ftp_open(char *name)
 	printf("open(host=`%s', port=`%d')\n", host, port);
 #endif /* DEBUG */
 
-#ifdef __WIN32__
+#ifdef __W32__
 	timeout_flag = 0;
 	fd = open_socket(host, port);
 #else
@@ -224,7 +248,7 @@ URL url_ftp_open(char *name)
 	fd = open_socket(host, port);
 	alarm(0);
 	signal(SIGALRM, SIG_DFL);
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 
 	if(fd < 0)
 	{
@@ -469,11 +493,11 @@ URL url_ftp_open(char *name)
 	url->abor = 1;
     }
 
-#ifdef __WIN32__
+#ifdef __W32__
     return url_buff_open((URL)url, 1);
 #else
     return (URL)url;
-#endif /* __WIN32__ */
+#endif /* __W32__ */
 }
 
 static long url_ftp_read(URL url, void *buff, long n)

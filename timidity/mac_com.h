@@ -1,6 +1,6 @@
 /* 
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -15,52 +15,36 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 	Macintosh interface for TiMidity
 	by T.Nogami	<t-nogami@happy.email.ne.jp>
 	
-    mac_errno.h
+    mac_com.h
 */
 
 #ifndef	MAC_COM_H
 #define	MAC_COM_H
 
-#ifdef __POWERPC__
- #define TIMID_CPU "PPC"
-#elif __MC68K__
- #if  __MC68881__
-  #define TIMID_CPU "68k+FPU"
- #else
-  #define TIMID_CPU "68k"
- #endif
-#endif
-
-#define	TIMID_VERSION	"1.0.0 " TIMID_CPU
-#define	TIMID_VERSION_PASCAL	"\p" TIMID_VERSION
-
-
-#define PI 3.14159265358979323846
-#define REVERB_PATCH
 #define SUPPORT_SOUNDSPEC
-#undef  DECOMPRESSOR_LIST
-#define DECOMPRESSOR_LIST { 0 }
 #undef  PATCH_EXT_LIST
 #define PATCH_EXT_LIST { ".pat", 0 }
+#define URL_DIR_CACHE_DISABLE
 
 #undef  DEFAULT_RATE
 #define DEFAULT_RATE	22050
 
 #define	AU_MACOS
-#define BIG_ENDIAN
 #undef  TILD_SCHEME_ENABLE
 #undef  JAPANESE
 #define ANOTHER_MAIN
 #define DEFAULT_PATH	""
 #undef  CONFIG_FILE
 #define CONFIG_FILE DEFAULT_PATH "timidity.cfg"
-#define ENABLE_SHERRY
+#define MAC_SIGNATURE 'TIMI'
+#define MAC_STARTUP_FOLDER_NAME "\pStartup items"
 
+#define ENABLE_SHERRY
 #define MAC_SOUNDBUF_QLENGTH (stdQLength*4)
 
 extern int presence_balance;

@@ -1,7 +1,6 @@
 /*
-
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -16,7 +15,7 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
     playmidi.c -- random stuff in need of rearrangement
 
@@ -33,16 +32,14 @@
 #else
 #include <strings.h>
 #endif
-
-#include "timidity.h"
-
-#ifndef __WIN32__
-#include <unistd.h>
-#else
+#include <math.h>
+#ifdef __W32__
 #include <windows.h>
-extern VOLATILE int intr;
-#endif /* __WIN32__ */
-
+#endif
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif /* HAVE_UNISTD_H */
+#include "timidity.h"
 #include "common.h"
 #include "instrum.h"
 #include "playmidi.h"
@@ -55,6 +52,13 @@ extern VOLATILE int intr;
 #include "arc.h"
 #include "reverb.h"
 #include "wrd.h"
+#include "aq.h"
+#include "freq.h"
+
+#define ABORT_AT_FATAL 1 /*#################*/
+#define MYCHECK(s) do { if(s == 0) { printf("## L %d\n", __LINE__); abort(); } } while(0)
+
+extern VOLATILE int intr;
 
 #ifdef SOLARIS
 /* shut gcc warning up */
@@ -67,40 +71,52 @@ int usleep(unsigned int useconds);
 
 #include "tables.h"
 
-#define PLAY_INTERLEAVE_SEC 1.0
-#define MIDITRACE_OUTPUT_FRAGMENTS 32
-#define DEFAULT_PORTAMENTO_TIME 0
-#define PORTAMENTO_TIME_TUNING	(1.0 / 5000.0)
+#define PLAY_INTERLEAVE_SEC		1.0
+#define PORTAMENTO_TIME_TUNING		(1.0 / 5000.0)
 #define PORTAMENTO_CONTROL_RATIO	256	/* controls per sec */
-#define DEFAULT_CHORUS_DELAY1 0.02
-#define DEFAULT_CHORUS_DELAY2 0.003
-#define CHORUS_OPPOSITE_THRESHOLD    32
-#define CHORUS_VELOCITY_TUNING1      0.7
-#define CHORUS_VELOCITY_TUNING2      0.6
-#define EOT_PRESEARCH_LEN 32
-#define SPEED_CHANGE_RATE 1.0594630943592953  /* 2^(1/12) */
+/*#define DEFAULT_CHORUS_DELAY1		0.02
+#define DEFAULT_CHORUS_DELAY2		0.003*/
+double DEFAULT_CHORUS_DELAY1 = 0.02;
+double DEFAULT_CHORUS_DELAY2 = 0.003;
+#define CHORUS_OPPOSITE_THRESHOLD	32
+/*#define CHORUS_VELOCITY_TUNING1		0.7
+#define CHORUS_VELOCITY_TUNING2		0.6*/
+double CHORUS_VELOCITY_TUNING1 = 0.7;
+double CHORUS_VELOCITY_TUNING2 = 0.6;
+#define EOT_PRESEARCH_LEN		32
+#define SPEED_CHANGE_RATE		1.0594630943592953  /* 2^(1/12) */
+
+/* Undefine if you don't want to use auto voice reduce implementation */
+#define REDUCE_VOICE_TIME_TUNING	(play_mode->rate/5) /* 0.2 sec */
+#ifdef REDUCE_VOICE_TIME_TUNING
+static int max_good_nv = 1;
+static int min_bad_nv = 256;
+static int32 ok_nv_total = 32;
+static int32 ok_nv_counts = 1;
+static int32 ok_nv_sample = 0;
+static int ok_nv = 32;
+static int old_rate = -1;
+#endif
 
 static int prescanning_flag;
 static int32 midi_restart_time = 0;
 Channel channel[MAX_CHANNELS];
 Voice voice[MAX_VOICES];
 int32 current_play_tempo = 500000;
-int32 play_tempo_offset = 0;
 int opt_realtime_playing = 0;
+int reduce_voice_threshold = -1;
 static MBlockList playmidi_pool;
 int check_eot_flag;
 int special_tonebank = -1;
 int default_tonebank = 0;
 int playmidi_seek_flag = 0;
-static int play_pause_flag = 0;
+int play_pause_flag = 0;
 static int file_from_stdin;
-static struct ReverbControls reverb_ctls[MAX_CHANNELS];
-static void set_reverb_level(int ch, int level);
-static int make_rvid_flag = 0;
-static int data_output_count;
-#define fragment_start_count (play_mode->rate)
 
-/* Ring voice id for each notes */
+static void set_reverb_level(int ch, int level);
+static int make_rvid_flag = 0; /* For reverb optimization */
+
+/* Ring voice id for each notes.  This ID enables duplicated note. */
 static uint8 vidq_head[128 * MAX_CHANNELS], vidq_tail[128 * MAX_CHANNELS];
 
 #ifdef MODULATION_WHEEL_ALLOW
@@ -132,6 +148,7 @@ int opt_chorus_control = 1;
 #else
 int opt_chorus_control = 0;
 #endif /* CHORUS_CONTROL_ALLOW */
+int opt_surround_chorus = 1;
 
 #ifdef GM_CHANNEL_PRESSURE_ALLOW
 int opt_channel_pressure = 1;
@@ -144,6 +161,15 @@ int opt_overlap_voice_allow = 1;
 #else
 int opt_overlap_voice_allow = 0;
 #endif /* OVERLAP_VOICE_ALLOW */
+
+/* TVA Env. Attack,Decay,Release... */
+int opt_tva_attack = 0;
+int opt_tva_decay = 0;
+int opt_tva_release = 0;
+int opt_delay_control = 0;
+int opt_resonance = 0;
+int opt_env_attack = 0;	/* 0:linear, 1:exponential1, 2:exponential2, 3:logarithmic */
+
 
 int voices=DEFAULT_VOICES, upper_voices;
 
@@ -158,32 +184,40 @@ ChannelBitMask default_drumchannel_mask;
 ChannelBitMask default_drumchannels;
 ChannelBitMask drumchannel_mask;
 ChannelBitMask drumchannels;
-int adjust_panning_immediately=0;
+int adjust_panning_immediately=1;
+int auto_reduce_polyphony=1;
 double envelope_modify_rate = 1.0;
+#if defined(CSPLINE_INTERPOLATION) || defined(LAGRANGE_INTERPOLATION)
+int reduce_quality_flag=0;
+int no_4point_interpolation=0;
+#endif
+char* pcm_alternate_file = NULL; /* NULL or "none": Nothing (default)
+				  * "auto": Auto select
+				  * filename: Use it
+				  */
 
 static int32 lost_notes, cut_notes;
 static int32 common_buffer[AUDIO_BUFFER_SIZE*2], /* stereo samples */
              *buffer_pointer;
+static int16 wav_buffer[AUDIO_BUFFER_SIZE*2];
 static int32 buffered_count;
-static char *channel_buffer = NULL; /* MAX_CHANNELS*AUDIO_BUFFER_SIZE*8 */
+static char *reverb_buffer = NULL; /* MAX_CHANNELS*AUDIO_BUFFER_SIZE*8 */
 
 
 static MidiEvent *event_list;
 static MidiEvent *current_event;
-static int32 sample_count;
-int32 current_sample;
-int note_key_offset = 0;
-FLOAT_T midi_time_ratio = 1.0;
+static int32 sample_count;	/* Length of event_list */
+int32 current_sample;		/* Number of calclated samples */
 
-#ifdef PRESENCE_HACK
-static void presence_resample(int32 count);
-extern double presence_delay_msec;
-#endif /* PRESENCE_HACK */
+int note_key_offset = 0;	/* For key up/down */
+FLOAT_T midi_time_ratio = 1.0;	/* For speed up/down */
 
 static void update_portamento_controls(int ch);
 static void update_rpn_map(int ch, int addr, int update_now);
 static void ctl_prog_event(int ch);
 static void ctl_timestamp(void);
+static void ctl_updatetime(int32 samples);
+static void ctl_pause_event(int pause, int32 samples);
 
 static char *event_name(int type)
 {
@@ -200,27 +234,30 @@ static char *event_name(int type)
 	EVENT_NAME(ME_TONE_BANK_MSB);
 	EVENT_NAME(ME_TONE_BANK_LSB);
 	EVENT_NAME(ME_MODULATION_WHEEL);
+	EVENT_NAME(ME_BREATH);
+	EVENT_NAME(ME_FOOT);
 	EVENT_NAME(ME_MAINVOLUME);
+	EVENT_NAME(ME_BALANCE);
 	EVENT_NAME(ME_PAN);
 	EVENT_NAME(ME_EXPRESSION);
 	EVENT_NAME(ME_SUSTAIN);
-	EVENT_NAME(ME_PORTAMENTO_TIME);
+	EVENT_NAME(ME_PORTAMENTO_TIME_MSB);
+	EVENT_NAME(ME_PORTAMENTO_TIME_LSB);
 	EVENT_NAME(ME_PORTAMENTO);
+	EVENT_NAME(ME_PORTAMENTO_CONTROL);
 	EVENT_NAME(ME_DATA_ENTRY_MSB);
 	EVENT_NAME(ME_DATA_ENTRY_LSB);
-#if 0
-	EVENT_NAME(ME_SUSTENUTO);
+	EVENT_NAME(ME_SOSTENUTO);
 	EVENT_NAME(ME_SOFT_PEDAL);
 	EVENT_NAME(ME_HARMONIC_CONTENT);
 	EVENT_NAME(ME_RELEASE_TIME);
 	EVENT_NAME(ME_ATTACK_TIME);
 	EVENT_NAME(ME_BRIGHTNESS);
-#endif
 	EVENT_NAME(ME_REVERB_EFFECT);
+	EVENT_NAME(ME_TREMOLO_EFFECT);
 	EVENT_NAME(ME_CHORUS_EFFECT);
-#if 0
-	EVENT_NAME(ME_VARIATION_EFFECT);
-#endif
+	EVENT_NAME(ME_CELESTE_EFFECT);
+	EVENT_NAME(ME_PHASER_EFFECT);
 	EVENT_NAME(ME_RPN_INC);
 	EVENT_NAME(ME_RPN_DEC);
 	EVENT_NAME(ME_NRPN_LSB);
@@ -232,16 +269,19 @@ static char *event_name(int type)
 	EVENT_NAME(ME_ALL_NOTES_OFF);
 	EVENT_NAME(ME_MONO);
 	EVENT_NAME(ME_POLY);
+#if 0
+	EVENT_NAME(ME_VOLUME_ONOFF);		/* Not supported */
+#endif
 	EVENT_NAME(ME_RANDOM_PAN);
 	EVENT_NAME(ME_SET_PATCH);
 	EVENT_NAME(ME_DRUMPART);
 	EVENT_NAME(ME_KEYSHIFT);
-#if 0
-	EVENT_NAME(ME_VOLUME_ONOFF);
-#endif
+	EVENT_NAME(ME_PATCH_OFFS);
+
 	EVENT_NAME(ME_TEMPO);
 	EVENT_NAME(ME_CHORUS_TEXT);
 	EVENT_NAME(ME_LYRIC);
+	EVENT_NAME(ME_GSLCD);
 	EVENT_NAME(ME_MARKER);
 	EVENT_NAME(ME_INSERT_TEXT);
 	EVENT_NAME(ME_TEXT);
@@ -249,9 +289,11 @@ static char *event_name(int type)
 	EVENT_NAME(ME_MASTER_VOLUME);
 	EVENT_NAME(ME_RESET);
 	EVENT_NAME(ME_NOTE_STEP);
-	EVENT_NAME(ME_PATCH_OFFS);
-	EVENT_NAME(ME_WRD);
 	EVENT_NAME(ME_TIMESIG);
+	EVENT_NAME(ME_WRD);
+	EVENT_NAME(ME_SHERRY);
+	EVENT_NAME(ME_BARMARKER);
+	EVENT_NAME(ME_STEP);
 	EVENT_NAME(ME_LAST);
 	EVENT_NAME(ME_EOT);
     }
@@ -299,7 +341,10 @@ static void reset_voices(void)
 {
     int i;
     for(i = 0; i < MAX_VOICES; i++)
+    {
 	voice[i].status = VOICE_FREE;
+	voice[i].chorus_link = i;
+    }
     upper_voices = 0;
     memset(vidq_head, 0, sizeof(vidq_head));
     memset(vidq_tail, 0, sizeof(vidq_tail));
@@ -335,6 +380,12 @@ static void reset_drum_controllers(struct DrumParts *d[], int note)
 		d[i]->drum_panning = NO_PANNING;
 		memset(d[i]->drum_envelope_rate, 0,
 		       sizeof(d[i]->drum_envelope_rate));
+		d[i]->pan_random = 0;
+		d[i]->drum_level = 1;
+		d[i]->note = 0;
+		d[i]->delay_level = 0;
+		d[i]->chorus_level = 0;
+		d[i]->reverb_level = 0;
 	    }
     }
     else
@@ -342,6 +393,12 @@ static void reset_drum_controllers(struct DrumParts *d[], int note)
 	d[note]->drum_panning = NO_PANNING;
 	memset(d[note]->drum_envelope_rate, 0,
 	       sizeof(d[note]->drum_envelope_rate));
+	d[note]->pan_random = 0;
+	d[note]->drum_level = 1;
+	d[note]->note = 0;
+	d[note]->delay_level = 0;
+	d[note]->chorus_level = 0;
+	d[note]->reverb_level = 0;
     }
 }
 
@@ -360,7 +417,8 @@ static void reset_controllers(int c)
   channel[c].pitchbend=0x2000;
   channel[c].pitchfactor=0; /* to be computed */
   channel[c].modulation_wheel = 0;
-  channel[c].portamento_time = DEFAULT_PORTAMENTO_TIME;
+  channel[c].portamento_time_lsb = 0;
+  channel[c].portamento_time_msb = 0;
   channel[c].porta_control_ratio = 0;
   channel[c].portamento = 0;
   channel[c].last_note_fine = -1;
@@ -371,12 +429,14 @@ static void reset_controllers(int c)
   channel[c].vibrato_delay = 0;
   memset(channel[c].envelope_rate, 0, sizeof(channel[c].envelope_rate));
   update_portamento_controls(c);
-  set_reverb_level(c, 0);
-  if(opt_chorus_control <= 1)
+  set_reverb_level(c, -1);
+  if(opt_chorus_control == 1)
       channel[c].chorus_level = 0;
   else
-      channel[c].chorus_level = opt_chorus_control;
+      channel[c].chorus_level = -opt_chorus_control;
   channel[c].mono = 0;
+  channel[c].delay_level = 0;
+  channel[c].resonance_level = 0;
 }
 
 static void redraw_controllers(int c)
@@ -387,9 +447,8 @@ static void redraw_controllers(int c)
     ctl_mode_event(CTLE_MOD_WHEEL, 1, c, channel[c].modulation_wheel);
     ctl_mode_event(CTLE_PITCH_BEND, 1, c, channel[c].pitchbend);
     ctl_prog_event(c);
-    ctl_mode_event(CTLE_CHORUS_EFFECT, 1, c, channel[c].chorus_level);
-    ctl_mode_event(CTLE_REVERB_EFFECT, 1, c,
-		   channel[c].rb ? channel[c].rb->level : 0);
+    ctl_mode_event(CTLE_CHORUS_EFFECT, 1, c, get_chorus_level(c));
+    ctl_mode_event(CTLE_REVERB_EFFECT, 1, c, get_reverb_level(c));
 }
 
 static void reset_midi(int playing)
@@ -402,6 +461,7 @@ static void reset_midi(int playing)
 	   event */
 	channel[i].program = default_program[i];
 	channel[i].panning = NO_PANNING;
+	channel[i].pan_random = 0;
 	/* tone bank or drum set */
 	if(ISDRUMCHANNEL(i))
 	{
@@ -415,11 +475,14 @@ static void reset_midi(int playing)
 	    else
 		channel[i].bank = default_tonebank;
 	}
-	channel[i].bank_lsb = channel[i].bank_msb = -1;
+	channel[i].bank_lsb = channel[i].bank_msb = 0;
+	if(play_system_mode == XG_SYSTEM_MODE && i % 16 == 9)
+	    channel[i].bank_msb = 127; /* Use MSB=127 for XG */
 	update_rpn_map(i, RPN_ADDR_FFFF, 0);
 	channel[i].special_sample = 0;
 	channel[i].key_shift = 0;
 	channel[i].mapID = get_default_mapID(i);
+	channel[i].lasttime = 0;
     }
     if(playing)
     {
@@ -429,9 +492,7 @@ static void reset_midi(int playing)
     }
     else
 	reset_voices();
-#ifdef PRESENCE_HACK
-    presence_resample(0);
-#endif /* PRESENCE_HACK */
+
     master_volume_ratio = 0xFFFF;
     adjust_amplification();
     if(current_file_info)
@@ -447,16 +508,18 @@ static void reset_midi(int playing)
 	memcpy(&drumchannel_mask, &default_drumchannel_mask,
 	       sizeof(drumchannels));
     }
+    ctl_mode_event(CTLE_MASTER_VOLUME, 0, amplification, 0);
 }
 
 void recompute_freq(int v)
 {
-  int ch=voice[v].channel;
+  int ch=voice[v].channel,note=voice[v].note;
   int
     sign=(voice[v].sample_increment < 0), /* for bidirectional loops */
     pb=channel[ch].pitchbend;
   double a;
   int32 tuning = 0;
+
 
   if(!voice[v].sample->sample_rate)
       return;
@@ -493,8 +556,9 @@ void recompute_freq(int v)
 
   if(!voice[v].porta_control_ratio)
   {
-      if(tuning == 0 && pb == 0x2000)
-	  voice[v].frequency = voice[v].orig_frequency;
+      if(tuning == 0 && pb == 0x2000) {
+	voice[v].frequency = voice[v].orig_frequency;
+      }
       else
       {
 	  pb -= 0x2000;
@@ -534,18 +598,21 @@ void recompute_freq(int v)
 	  i = -i;
 	  pf = 1.0 / (bend_fine[(i>>5) & 0xFF] * bend_coarse[(i>>13) & 0x7F]);
       }
-
       voice[v].frequency = (int32)((double)(voice[v].orig_frequency) * pf);
       voice[v].cache = NULL;
   }
+
 
   a = TIM_FSCALE(((double)voice[v].sample->sample_rate * voice[v].frequency) /
 		 ((double)voice[v].sample->root_freq * play_mode->rate),
 		 FRACTION_BITS) + 0.5;
 
+  if(sign)
+      a = -a; /* need to preserve the loop direction */
+
+  voice[v].sample_increment = (int32)a;
 #ifdef ABORT_AT_FATAL
-  if((int32)a == 0)
-  {
+  if (voice[v].sample_increment == 0) {
       fprintf(stderr, "Invalid sample increment a=%e %ld %ld %ld %ld%s\n",
 	      a, (long)voice[v].sample->sample_rate, (long)voice[v].frequency,
 	      (long)voice[v].sample->root_freq, (long)play_mode->rate,
@@ -553,22 +620,24 @@ void recompute_freq(int v)
       abort();
   }
 #endif /* ABORT_AT_FATAL */
-
-  if(sign)
-      a = -a; /* need to preserve the loop direction */
-
-  voice[v].sample_increment = (int32)a;
 }
 
 static void recompute_amp(int v)
 {
     FLOAT_T tempamp;
 
-    tempamp = ((FLOAT_T)master_volume *
-	       voice[v].velocity *
-	       voice[v].sample->volume *
-	       channel[voice[v].channel].volume *
-	       channel[voice[v].channel].expression); /* 21 bits */
+	tempamp = ((FLOAT_T)master_volume *
+		   velocity_table[voice[v].velocity] *
+		   voice[v].sample->volume *
+		   channel[voice[v].channel].volume *
+		   channel[voice[v].channel].expression); /* 21 bits */
+
+	/* Level of Drum */
+	if(ISDRUMCHANNEL(voice[v].channel)
+		&& channel[voice[v].channel].drums[voice[v].note] != NULL
+		&& channel[voice[v].channel].drums[voice[v].note]->drum_level != 1) {
+		tempamp *= channel[voice[v].channel].drums[voice[v].note]->drum_level;
+	}
 
     if(!(play_mode->encoding & PE_MONO))
     {
@@ -603,35 +672,512 @@ static void recompute_amp(int v)
     }
 }
 
-static Instrument *play_midi_load_instrument(int dr, int bk, int prog)
+Instrument *play_midi_load_instrument(int dr, int bk, int prog)
 {
     ToneBank **bank = ((dr) ? drumset : tonebank);
     Instrument *ip;
+    int load_success;
 
     if(bank[bk] == NULL)
 	bk = 0;
 
-    if((ip = bank[bk]->tone[prog].instrument) == MAGIC_LOAD_INSTRUMENT)
-	ip = bank[bk]->tone[prog].instrument = load_instrument(dr, bk, prog);
-    if(ip == NULL && bk != 0)
+    load_success = 0;
+    if(opt_realtime_playing != 2)
     {
-	/* Instrument is not found.
-	   Retry to load the instrument from bank 0 */
+	if((ip = bank[bk]->tone[prog].instrument) == MAGIC_LOAD_INSTRUMENT)
+	{
+	    ip = bank[bk]->tone[prog].instrument =
+		load_instrument(dr, bk, prog);
+	    if(ip != NULL)
+		load_success = 1;
+	}
+	if(ip == NULL && bk != 0)
+	{
+	    /* Instrument is not found.
+	       Retry to load the instrument from bank 0 */
 
-	if((ip = bank[0]->tone[prog].instrument) == MAGIC_LOAD_INSTRUMENT)
-	    ip = bank[0]->tone[prog].instrument = load_instrument(dr, 0, prog);
-	if(ip != NULL)
-	    bank[bk]->tone[prog].instrument = ip;
+	    if((ip = bank[0]->tone[prog].instrument) == MAGIC_LOAD_INSTRUMENT)
+		ip = bank[0]->tone[prog].instrument =
+		    load_instrument(dr, 0, prog);
+	    if(ip != NULL)
+	    {
+		bank[bk]->tone[prog].instrument = ip;
+		load_success = 1;
+	    }
+	}
     }
+    else
+    {
+	if((ip = bank[bk]->tone[prog].instrument) == NULL)
+	{
+	    ip = bank[bk]->tone[prog].instrument =
+		load_instrument(dr, bk, prog);
+	    if(ip != NULL)
+		load_success = 1;
+	}
+	if(ip == NULL && bk != 0)
+	{
+	    /* Instrument is not found.
+	       Retry to load the instrument from bank 0 */
+	    if((ip = bank[0]->tone[prog].instrument) == NULL)
+		ip = bank[0]->tone[prog].instrument =
+		    load_instrument(dr, 0, prog);
+	    if(ip != NULL)
+	    {
+		bank[bk]->tone[prog].instrument = ip;
+		load_success = 1;
+	    }
+	}
+    }
+
+    if(load_success)
+	aq_add(NULL, 0); /* Update software buffer */
+
+    if(ip == MAGIC_ERROR_INSTRUMENT)
+	return NULL;
+    if(ip == NULL)
+	bank[bk]->tone[prog].instrument = MAGIC_ERROR_INSTRUMENT;
 
     return ip;
 }
+
+#if 0
+/* reduce_voice_CPU() may not have any speed advantage over reduce_voice().
+ * So this function is not used, now.
+ */
+
+/* The goal of this routine is to free as much CPU as possible without
+   loosing too much sound quality.  We would like to know how long a note
+   has been playing, but since we usually can't calculate this, we guess at
+   the value instead.  A bad guess is better than nothing.  Notes which
+   have been playing a short amount of time are killed first.  This causes
+   decays and notes to be cut earlier, saving more CPU time.  It also causes
+   notes which are closer to ending not to be cut as often, so it cuts
+   a different note instead and saves more CPU in the long run.  ON voices
+   are treated a little differently, since sound quality is more important
+   than saving CPU at this point.  Duration guesses for loop regions are very
+   crude, but are still better than nothing, they DO help.  Non-looping ON
+   notes are cut before looping ON notes.  Since a looping ON note is more
+   likely to have been playing for a long time, we want to keep it because it
+   sounds better to keep long notes.
+*/
+static int reduce_voice_CPU(void)
+{
+    int32 lv, v, vr;
+    int i, j, lowest=-0x7FFFFFFF;
+    int32 duration;
+
+    i = upper_voices;
+    lv = 0x7FFFFFFF;
+    
+    /* Look for the decaying note with the longest remaining decay time */
+    /* Protect drum decays.  They do not take as much CPU (?) and truncating
+       them early sounds bad, especially on snares and cymbals */
+    for(j = 0; j < i; j++)
+    {
+	if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+	/* skip notes that don't need resampling (most drums) */
+	if (voice[j].sample->note_to_use)
+	    continue;
+	if(voice[j].status & ~(VOICE_ON | VOICE_DIE | VOICE_SUSTAINED))
+	{
+	    /* Choose note with longest decay time remaining */
+	    /* This frees more CPU than choosing lowest volume */
+	    if (!voice[j].envelope_increment) duration = 0;
+	    else duration =
+	    	(voice[j].envelope_target - voice[j].envelope_volume) /
+	    	voice[j].envelope_increment;
+	    v = -duration;
+	    if(v < lv)
+	    {
+		lv = v;
+		lowest = j;
+	    }
+	}
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	/* This can still cause a click, but if we had a free voice to
+	   spare for ramping down this note, we wouldn't need to kill it
+	   in the first place... Still, this needs to be fixed. Perhaps
+	   we could use a reserve of voices to play dying notes only. */
+
+	cut_notes++;
+	return lowest;
+    }
+
+    /* try to remove VOICE_DIE before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -1;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+      if(voice[j].status & ~(VOICE_ON | VOICE_SUSTAINED))
+      {
+	/* continue protecting non-resample decays */
+	if (voice[j].status & ~(VOICE_DIE) && voice[j].sample->note_to_use)
+		continue;
+
+	/* choose note which has been on the shortest amount of time */
+	/* this is a VERY crude estimate... */
+	if (voice[j].sample->modes & MODES_LOOPING)
+	    duration = voice[j].sample_offset - voice[j].sample->loop_start;
+	else
+	    duration = voice[j].sample_offset;
+	if (voice[j].sample_increment > 0)
+	    duration /= voice[j].sample_increment;
+	v = duration;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -1)
+    {
+	cut_notes++;
+	return lowest;
+    }
+
+    /* try to remove VOICE_SUSTAINED before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+      if(voice[j].status & VOICE_SUSTAINED)
+      {
+	/* choose note which has been on the shortest amount of time */
+	/* this is a VERY crude estimate... */
+	if (voice[j].sample->modes & MODES_LOOPING)
+	    duration = voice[j].sample_offset - voice[j].sample->loop_start;
+	else
+	    duration = voice[j].sample_offset;
+	if (voice[j].sample_increment > 0)
+	    duration /= voice[j].sample_increment;
+	v = duration;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	cut_notes++;
+	return lowest;
+    }
+
+    /* try to remove chorus before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+      if(voice[j].chorus_link < j)
+      {
+	/* score notes based on both volume AND duration */
+	/* this scoring function needs some more tweaking... */
+	if (voice[j].sample->modes & MODES_LOOPING)
+	    duration = voice[j].sample_offset - voice[j].sample->loop_start;
+	else
+	    duration = voice[j].sample_offset;
+	if (voice[j].sample_increment > 0)
+	    duration /= voice[j].sample_increment;
+	v = voice[j].left_mix * duration;
+	vr = voice[j].right_mix * duration;
+	if(voice[j].panned == PANNED_MYSTERY && vr > v)
+	    v = vr;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	cut_notes++;
+
+	/* hack - double volume of chorus partner, fix pan */
+	j = voice[lowest].chorus_link;
+	voice[j].velocity <<= 1;
+    	voice[j].panning = channel[voice[lowest].channel].panning;
+    	recompute_amp(j);
+    	apply_envelope_to_amp(j);
+
+	return lowest;
+    }
+
+    lost_notes++;
+
+    /* try to remove non-looping voices first */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+      if(voice[j].sample->modes & ~MODES_LOOPING)
+      {
+	/* score notes based on both volume AND duration */
+	/* this scoring function needs some more tweaking... */
+	duration = voice[j].sample_offset;
+	if (voice[j].sample_increment > 0)
+	    duration /= voice[j].sample_increment;
+	v = voice[j].left_mix * duration;
+	vr = voice[j].right_mix * duration;
+	if(voice[j].panned == PANNED_MYSTERY && vr > v)
+	    v = vr;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	return lowest;
+    }
+
+    lv = 0x7FFFFFFF;
+    lowest = 0;
+    for(j = 0; j < i; j++)
+    {
+	if(voice[j].status & VOICE_FREE || voice[j].cache != NULL)
+	    continue;
+	if (voice[j].sample->modes & ~MODES_LOOPING) continue;
+
+	/* score notes based on both volume AND duration */
+	/* this scoring function needs some more tweaking... */
+	duration = voice[j].sample_offset - voice[j].sample->loop_start;
+	if (voice[j].sample_increment > 0)
+	    duration /= voice[j].sample_increment;
+	v = voice[j].left_mix * duration;
+	vr = voice[j].right_mix * duration;
+	if(voice[j].panned == PANNED_MYSTERY && vr > v)
+	    v = vr;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+    }
+
+    return lowest;
+}
+#endif
+
+/* this reduces voices while maintaining sound quality */
+static int reduce_voice(void)
+{
+    int32 lv, v;
+    int i, j, lowest=-0x7FFFFFFF;
+
+    i = upper_voices;
+    lv = 0x7FFFFFFF;
+    
+    /* Look for the decaying note with the smallest volume */
+    /* Protect drum decays.  Truncating them early sounds bad, especially on
+       snares and cymbals */
+    for(j = 0; j < i; j++)
+    {
+	if(voice[j].status & VOICE_FREE ||
+	   (voice[j].sample->note_to_use && ISDRUMCHANNEL(voice[j].channel)))
+	    continue;
+	
+	if(voice[j].status & ~(VOICE_ON | VOICE_DIE | VOICE_SUSTAINED))
+	{
+	    /* find lowest volume */
+	    v = voice[j].left_mix;
+	    if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    	v = voice[j].right_mix;
+	    if(v < lv)
+	    {
+		lv = v;
+		lowest = j;
+	    }
+	}
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	/* This can still cause a click, but if we had a free voice to
+	   spare for ramping down this note, we wouldn't need to kill it
+	   in the first place... Still, this needs to be fixed. Perhaps
+	   we could use a reserve of voices to play dying notes only. */
+
+	cut_notes++;
+	free_voice(lowest);
+	if(!prescanning_flag)
+	    ctl_note_event(lowest);
+	return lowest;
+    }
+
+    /* try to remove VOICE_DIE before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -1;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE)
+	    continue;
+      if(voice[j].status & ~(VOICE_ON | VOICE_SUSTAINED))
+      {
+	/* continue protecting drum decays */
+	if (voice[j].status & ~(VOICE_DIE) &&
+	    (voice[j].sample->note_to_use && ISDRUMCHANNEL(voice[j].channel)))
+		continue;
+	/* find lowest volume */
+	v = voice[j].left_mix;
+	if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    v = voice[j].right_mix;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -1)
+    {
+	cut_notes++;
+	free_voice(lowest);
+	if(!prescanning_flag)
+	    ctl_note_event(lowest);
+	return lowest;
+    }
+
+    /* try to remove VOICE_SUSTAINED before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE)
+	    continue;
+      if(voice[j].status & VOICE_SUSTAINED)
+      {
+	/* find lowest volume */
+	v = voice[j].left_mix;
+	if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    v = voice[j].right_mix;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	cut_notes++;
+	free_voice(lowest);
+	if(!prescanning_flag)
+	    ctl_note_event(lowest);
+	return lowest;
+    }
+
+    /* try to remove chorus before VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+      if(voice[j].status & VOICE_FREE)
+	    continue;
+      if(voice[j].chorus_link < j)
+      {
+	/* find lowest volume */
+	v = voice[j].left_mix;
+	if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    v = voice[j].right_mix;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+      }
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	cut_notes++;
+
+	/* hack - double volume of chorus partner, fix pan */
+	j = voice[lowest].chorus_link;
+	voice[j].velocity <<= 1;
+    	voice[j].panning = channel[voice[lowest].channel].panning;
+    	recompute_amp(j);
+    	apply_envelope_to_amp(j);
+
+	free_voice(lowest);
+	if(!prescanning_flag)
+	    ctl_note_event(lowest);
+	return lowest;
+    }
+
+    lost_notes++;
+
+    /* remove non-drum VOICE_ON */
+    lv = 0x7FFFFFFF;
+    lowest = -0x7FFFFFFF;
+    for(j = 0; j < i; j++)
+    {
+        if(voice[j].status & VOICE_FREE ||
+	   (voice[j].sample->note_to_use && ISDRUMCHANNEL(voice[j].channel)))
+	   	continue;
+
+	/* find lowest volume */
+	v = voice[j].left_mix;
+	if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    v = voice[j].right_mix;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+    }
+    if(lowest != -0x7FFFFFFF)
+    {
+	free_voice(lowest);
+	if(!prescanning_flag)
+	    ctl_note_event(lowest);
+	return lowest;
+    }
+
+    /* remove all other types of notes */
+    lv = 0x7FFFFFFF;
+    lowest = 0;
+    for(j = 0; j < i; j++)
+    {
+	if(voice[j].status & VOICE_FREE)
+	    continue;
+	/* find lowest volume */
+	v = voice[j].left_mix;
+	if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
+	    v = voice[j].right_mix;
+	if(v < lv)
+	{
+	    lv = v;
+	    lowest = j;
+	}
+    }
+
+    free_voice(lowest);
+    if(!prescanning_flag)
+	ctl_note_event(lowest);
+    return lowest;
+}
+
+
 
 /* Only one instance of a note can be playing on a single channel. */
 static int find_voice(MidiEvent *e)
 {
   int i, j, lowest=-1, note, ch, status_check, mono_check;
-  int32 lv, v;
   AlternateAssign *altassign;
 
   note = MIDI_EVENT_NOTE(e);
@@ -674,60 +1220,21 @@ static int find_voice(MidiEvent *e)
 
   if(i < voices)
       return upper_voices++;
+  return reduce_voice();
+}
 
-  lv = 0x7FFFFFFF;
-  /* Look for the decaying note with the lowest volume */
-  for(j = 0; j < i; j++)
+void free_voice(int v1)
+{
+    int v2;
+
+    v2 = voice[v1].chorus_link;
+    if(v1 != v2)
     {
-      if(voice[j].status & ~(VOICE_ON | VOICE_DIE))
-	{
-	  v=voice[j].left_mix;
-	  if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
-	      v=voice[j].right_mix;
-	  if (v<lv)
-	    {
-	      lv=v;
-	      lowest=j;
-	    }
-	}
+	/* Unlink chorus link */
+	voice[v1].chorus_link = v1;
+	voice[v2].chorus_link = v2;
     }
-
-  if (lowest != -1)
-    {
-      /* This can still cause a click, but if we had a free voice to
-	 spare for ramping down this note, we wouldn't need to kill it
-	 in the first place... Still, this needs to be fixed. Perhaps
-	 we could use a reserve of voices to play dying notes only. */
-
-      cut_notes++;
-      /*fprintf(stderr, "cuts\n");*/
-      voice[lowest].status=VOICE_FREE;
-      if(!prescanning_flag)
-	  ctl_note_event(lowest);
-      return lowest;
-    }
-
-  lost_notes++;
-  lv = voice[0].left_mix;
-  if(voice[0].panned == PANNED_MYSTERY && voice[0].right_mix > lv)
-      lv = voice[0].right_mix;
-  lowest = 0;
-  for(j = 1; j < i; j++)
-  {
-      v = voice[j].left_mix;
-      if(voice[j].panned == PANNED_MYSTERY && voice[j].right_mix > v)
-	  v = voice[j].right_mix;
-      if(v < lv)
-      {
-	  lv = v;
-	  lowest = j;
-      }
-  }
-
-  voice[lowest].status = VOICE_FREE;
-  if(!prescanning_flag)
-      ctl_note_event(lowest);
-  return lowest;
+    voice[v1].status = VOICE_FREE;
 }
 
 static int find_free_voice(void)
@@ -750,7 +1257,8 @@ static int find_free_voice(void)
     lowest = -1;
     for(i = 0; i < nv; i++)
     {
-	if(voice[i].status & ~(VOICE_ON | VOICE_DIE))
+	if(voice[i].status & ~(VOICE_ON | VOICE_DIE) &&
+	   !(voice[i].sample->note_to_use && ISDRUMCHANNEL(voice[i].channel)))
 	{
 	    v = voice[i].left_mix;
 	    if((voice[i].panned==PANNED_MYSTERY) && (voice[i].right_mix>v))
@@ -764,7 +1272,7 @@ static int find_free_voice(void)
     }
     if(lowest != -1 && !prescanning_flag)
     {
-	voice[lowest].status = VOICE_FREE;
+	free_voice(lowest);
 	ctl_note_event(lowest);
     }
     return lowest;
@@ -782,6 +1290,7 @@ static int select_play_sample(Sample *splist, int nsp,
     {
 	j = vlist[0] = find_voice(e);
 	voice[j].orig_frequency = f;
+	MYCHECK(voice[j].orig_frequency);
 	voice[j].sample = splist;
 	voice[j].status = VOICE_ON;
 	return 1;
@@ -796,6 +1305,7 @@ static int select_play_sample(Sample *splist, int nsp,
 	{
 	    j = vlist[nv] = find_voice(e);
 	    voice[j].orig_frequency = f;
+	    MYCHECK(voice[j].orig_frequency);
 	    voice[j].sample = sp;
 	    voice[j].status = VOICE_ON;
 	    nv++;
@@ -841,7 +1351,12 @@ static int find_samples(MidiEvent *e, int *vlist)
 			  channel[ch].special_sample);
 		return 0;
 	    }
-	    return select_play_sample(s->sample, s->samples, e->a, vlist, e);
+	    note = e->a + note_key_offset;
+	    if(note < 0)
+		note = 0;
+	    else if(note > 127)
+		note = 127;
+	    return select_play_sample(s->sample, s->samples, note, vlist, e);
 	}
 
 	bk = channel[ch].bank;
@@ -860,6 +1375,12 @@ static int find_samples(MidiEvent *e, int *vlist)
 		note = ip->sample->note_to_use;
 	    i = vlist[0] = find_voice(e);
 	    voice[i].orig_frequency = freq_table[note];
+        /* NRPN Coarse Pitch of Drum (GS) */
+		if(ISDRUMCHANNEL(ch) &&
+		    channel[ch].drums[note] != NULL &&
+			channel[ch].drums[note]->note) {
+	        voice[i].orig_frequency = freq_table[channel[ch].drums[note]->note];
+		}
 	    voice[i].sample = ip->sample;
 	    voice[i].status = VOICE_ON;
 	    return 1;
@@ -908,20 +1429,22 @@ static int find_samples(MidiEvent *e, int *vlist)
 		    voice[j].cache = NULL;
 	    }
 	}
-
 	return nv;
 }
 
 static void start_note(MidiEvent *e, int i, int vid, int cnt)
 {
-  int j, ch, note;
+  int j, ch, note, pan;
 
   ch = e->channel;
+
   note = MIDI_EVENT_NOTE(e);
-  voice[i].status=VOICE_ON;
-  voice[i].channel=ch;
-  voice[i].note=note;
-  voice[i].velocity=e->b;
+  voice[i].status = VOICE_ON;
+  voice[i].channel = ch;
+  voice[i].note = note;
+  voice[i].velocity = e->b;
+  voice[i].chorus_link = i;	/* No link */
+
   j = channel[ch].special_sample;
   if(j == 0 || special_patch[j] == NULL)
       voice[i].sample_offset = 0;
@@ -936,7 +1459,7 @@ static void start_note(MidiEvent *e, int i, int vid, int cnt)
       }
       else if(voice[i].sample_offset > voice[i].sample->data_length)
       {
-	  voice[i].status = VOICE_FREE;
+	  free_voice(i);
 	  return;
       }
   }
@@ -973,22 +1496,19 @@ static void start_note(MidiEvent *e, int i, int vid, int cnt)
     voice[i].vibrato_sample_increment[j]=0;
 
   /* Pan */
+  if(channel[ch].panning != NO_PANNING) pan = channel[ch].panning;
+  else pan = 64;
   if(ISDRUMCHANNEL(ch) &&
      channel[ch].drums[note] != NULL &&
      channel[ch].drums[note]->drum_panning != NO_PANNING)
-      voice[i].panning = channel[ch].drums[note]->drum_panning;
-  else if(channel[ch].panning != NO_PANNING)
-      voice[i].panning = channel[ch].panning;
+      pan += channel[ch].drums[note]->drum_panning - 64;
   else
-      voice[i].panning = voice[i].sample->panning;
+      pan += voice[i].sample->panning - 64;
+  if (pan > 127) pan = 127;
+  if (pan < 0) pan = 0;
+  voice[i].panning = pan;
 
-  if(channel[ch].portamento && !channel[ch].porta_control_ratio)
-  {
-      update_portamento_controls(ch);
-      if(!channel[ch].porta_control_ratio)
-	  channel[ch].portamento = 0;
-  }
-
+  voice[i].porta_control_counter = 0;
   if(channel[ch].portamento && !channel[ch].porta_control_ratio)
       update_portamento_controls(ch);
   if(channel[ch].porta_control_ratio)
@@ -1031,118 +1551,495 @@ static void start_note(MidiEvent *e, int i, int vid, int cnt)
     }
 
   voice[i].timeout = -1;
-  if(cnt == 0 && channel[ch].rb != NULL && channel[ch].rb->lastin == 0)
-      channel[ch].rb->lastin = current_sample + 1;
   if(!prescanning_flag)
       ctl_note_event(i);
 }
 
 static void finish_note(int i)
 {
-  if (voice[i].sample->modes & MODES_ENVELOPE)
+    if (voice[i].sample->modes & MODES_ENVELOPE)
     {
-      /* We need to get the envelope out of Sustain stage. */
-      /* Note that voice[i].envelope_stage < 3 */
-      voice[i].status=VOICE_OFF;
-      voice[i].envelope_stage=3;
-      recompute_envelope(i);
-      apply_envelope_to_amp(i);
-      ctl_note_event(i);
+	/* We need to get the envelope out of Sustain stage. */
+	/* Note that voice[i].envelope_stage < 3 */
+	voice[i].status=VOICE_OFF;
+	voice[i].envelope_stage=3;
+	recompute_envelope(i);
+	apply_envelope_to_amp(i);
+	ctl_note_event(i);
     }
-  else
+    else
     {
-      /* Set status to OFF so resample_voice() will let this voice out
-         of its loop, if any. In any case, this voice dies when it
-         hits the end of its data (ofs>=data_length). */
-	if(voice[i].status != VOICE_OFF)
+	if(current_file_info->pcm_mode != PCM_MODE_NON)
 	{
-	    voice[i].status=VOICE_OFF;
+	    free_voice(i);
 	    ctl_note_event(i);
+	}
+	else
+	{
+	    /* Set status to OFF so resample_voice() will let this voice out
+		of its loop, if any. In any case, this voice dies when it
+		    hits the end of its data (ofs>=data_length). */
+	    if(voice[i].status != VOICE_OFF)
+	    {
+		voice[i].status = VOICE_OFF;
+		ctl_note_event(i);
+	    }
 	}
     }
 }
 
-static void new_chorus_voice(int v, int level)
+static void set_envelope_time(int ch,int val,int stage)
 {
-    int cv, ch;
+	val = val & 0x7F;
+	if(play_system_mode != GS_SYSTEM_MODE) {
+		val = val / 2 + 32;
+	}
+	val -= 64;
+	if(channel[ch].mapID == SC_55_TONE_MAP) {
+		val *= 1.23;
+		if(val > 63) {val = 63;}
+		else if(val < -64) {val = -64;}
+	}
+	switch(stage) {
+	case 0:	// Attack
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Attack Time (CH:%d VALUE:%d)",ch,val);
+		break;
+	case 1: // Decay
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Decay Time (CH:%d VALUE:%d)",ch,val);
+		break;
+	case 3:	// Release
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Release Time (CH:%d VALUE:%d)",ch,val);
+		break;
+	default:
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"? Time (CH:%d VALUE:%d)",ch,val);
+	}
+	channel[ch].envelope_rate[stage] = val;
+}
+
+static void new_flanger_voice(int v1, int level1,int level2)
+{
+    int v2,i,fb_loop,level,ch,pan;
+	double delay,width;
+	int32 orig_frequency;
+
+	ch = voice[v1].channel;
+	fb_loop = abs(level2) / 16;
+	level = (level2 + 64) >> 2;
+	level1 += rand() % 64 - 32;
+	width = 1.0 - level1 * 0.01;
+
+	delay = 0;
+	if((v2 = find_free_voice()) == -1) {return;}
+	delay += width;
+	voice[v2] = voice[v1];	/* copy all parameters */
+	voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+	pan = rand() % 8 - 4;
+	voice[v2].panning += pan;
+	orig_frequency = voice[v1].orig_frequency;
+	orig_frequency *= bend_fine[level];
+	voice[v2].orig_frequency = orig_frequency;
+	voice[v2].cache = NULL;
+	recompute_amp(v2);
+	apply_envelope_to_amp(v2);
+	recompute_freq(v2);
+	for(i=0;i<fb_loop;i++) {
+		delay += width;
+		if((v2 = find_free_voice()) == -1) {return;}
+		voice[v2] = voice[v1];
+		voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+		pan = rand() % 8 - 4;
+		voice[v2].panning += pan;
+		orig_frequency *= bend_fine[level];
+		voice[v2].orig_frequency = orig_frequency;
+		voice[v2].cache = NULL;
+		recompute_amp(v2);
+		apply_envelope_to_amp(v2);
+		recompute_freq(v2);
+	}
+}
+
+
+static void new_delay_voice(int v1, int level)
+{
+    int v2,i,fb_loop,ch=voice[v1].channel;
+	int32 orig_frequency;
+	double delay,vol,fb_ratio;
+	uint8 pan;
+	struct delay_status_t *status = get_delay_status();
+	double threshold = 1.0;
+
+	/* NRPN Delay Send Level of Drum */
+	if(ISDRUMCHANNEL(ch) &&	channel[ch].drums[voice[v1].note] != NULL) {
+		level *= (FLOAT_T)channel[ch].drums[voice[v1].note]->delay_level / 127.0;
+	}
+
+	fb_loop = status->fb_loop;
+	fb_ratio = status->fb_ratio;
+
+	vol = voice[v1].velocity * level * status->level_ratio_center;
+	if (vol > threshold) {	/* First Delay */
+		delay = 0;
+		if((v2 = find_free_voice()) == -1) {return;}
+		orig_frequency = voice[v1].orig_frequency;
+		orig_frequency *= bend_fine[level >> 2];
+		voice[v2].orig_frequency = orig_frequency;
+		voice[v2].cache = NULL;
+		delay += status->time_center;
+		voice[v2] = voice[v1];	/* copy all parameters */
+		voice[v2].velocity = (uint8)vol;
+		voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+		recompute_amp(v2);
+		apply_envelope_to_amp(v2);
+		recompute_freq(v2);
+		for(i=0;i<fb_loop;i++) {	/* Feedback */
+			vol *= fb_ratio;
+			delay += status->time_center;
+			if(vol < threshold) {break;}
+			if((v2 = find_free_voice()) == -1) {return;}
+			orig_frequency *= bend_fine[level >> 2];
+			voice[v2].orig_frequency = orig_frequency;
+			voice[v2].cache = NULL;
+			voice[v2] = voice[v1];	/* copy all parameters */
+			voice[v2].velocity = (uint8)vol;
+			voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+			recompute_amp(v2);
+			apply_envelope_to_amp(v2);
+			recompute_freq(v2);
+		}
+	}
+
+	if(status->level_left) {
+		vol = voice[v1].velocity * level * status->level_ratio_left;
+		if (vol > threshold) {	/* First Delay */
+			delay = 0;
+			pan = voice[v1].panning - 64;
+			if((v2 = find_free_voice()) == -1) {return;}
+			orig_frequency = voice[v1].orig_frequency;
+			orig_frequency *= bend_fine[level >> 2];
+			voice[v2].orig_frequency = orig_frequency;
+			voice[v2].cache = NULL;
+			delay += status->time_left;
+			voice[v2] = voice[v1];	/* copy all parameters */
+			voice[v2].velocity = (uint8)vol;
+			voice[v2].delay += (int)(play_mode->rate * delay / 1000);	
+			voice[v2].panning = pan;
+			recompute_amp(v2);
+			apply_envelope_to_amp(v2);
+			recompute_freq(v2);
+			for(i=0;i<fb_loop;i++) {	/* Feedback */
+				vol *= fb_ratio;
+				delay += status->time_left;
+				if(vol < threshold) {break;}
+				if((v2 = find_free_voice()) == -1) {return;}
+				orig_frequency *= bend_fine[level >> 2];
+				voice[v2].orig_frequency = orig_frequency;
+				voice[v2].cache = NULL;
+				voice[v2] = voice[v1];	/* copy all parameters */
+				voice[v2].velocity = (uint8)vol;
+				voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+				voice[v2].panning = pan;
+				recompute_amp(v2);
+				apply_envelope_to_amp(v2);
+				recompute_freq(v2);
+			}
+		}
+	}
+
+	if(status->level_right) {
+		vol = voice[v1].velocity * level * status->level_ratio_right;
+		if (vol > threshold) {	/* First Delay */
+			delay = 0;
+			pan = voice[v1].panning - 64;
+			if((v2 = find_free_voice()) == -1) {return;}
+			orig_frequency = voice[v1].orig_frequency;
+			orig_frequency *= bend_fine[level >> 2];
+			voice[v2].orig_frequency = orig_frequency;
+			voice[v2].cache = NULL;
+			delay += status->time_right;
+			voice[v2] = voice[v1];	/* copy all parameters */
+			voice[v2].velocity = (uint8)vol;
+			voice[v2].delay += (int)(play_mode->rate * delay / 1000);	
+			voice[v2].panning = pan;
+			recompute_amp(v2);
+			apply_envelope_to_amp(v2);
+			recompute_freq(v2);
+			for(i=0;i<fb_loop;i++) {	/* Feedback */
+				vol *= fb_ratio;
+				delay += status->time_right;
+				if(vol < threshold) {break;}
+				if((v2 = find_free_voice()) == -1) {return;}
+				orig_frequency *= bend_fine[level >> 2];
+				voice[v2].orig_frequency = orig_frequency;
+				voice[v2].cache = NULL;
+				voice[v2] = voice[v1];	/* copy all parameters */
+				voice[v2].velocity = (uint8)vol;
+				voice[v2].delay += (int)(play_mode->rate * delay / 1000);
+				voice[v2].panning = pan;
+				recompute_amp(v2);
+				apply_envelope_to_amp(v2);
+				recompute_freq(v2);
+			}
+		}
+	}
+}
+
+static void new_chorus_voice(int v1, int level)
+{
+    int v2, ch;
     uint8 vol;
+    struct chorus_status_t *status = get_chorus_status();
 
-    if((cv = find_free_voice()) == -1)
+    if((v2 = find_free_voice()) == -1)
 	return;
-    ch = voice[v].channel;
+    ch = voice[v1].channel;
+    vol = voice[v1].velocity;
+    voice[v2] = voice[v1];	/* copy all parameters */
 
-    vol = voice[v].velocity;
-    voice[cv] = voice[v];
-    voice[v].velocity  = (uint8)(vol * CHORUS_VELOCITY_TUNING1);
-    voice[cv].velocity = (uint8)(vol * CHORUS_VELOCITY_TUNING2);
-    if (level > 42) level = 42;    /* higher levels detune notes too much */
+	/* NRPN Chorus Send Level of Drum */
+	if(ISDRUMCHANNEL(ch) && channel[ch].drums[voice[v1].note] != NULL) {
+		level *= (FLOAT_T)channel[ch].drums[voice[v1].note]->chorus_level / 127.0;
+	}
+
+    /* Choose lower voice index for base voice (v1) */
+    if(v1 > v2)
+    {
+	int tmp;
+	tmp = v1;
+	v1 = v2;
+	v2 = v1;
+    }
+
+    /* v1: Base churos voice
+     * v2: Sub chorus voice (detuned)
+     */
+
+    voice[v1].velocity = (uint8)(vol * CHORUS_VELOCITY_TUNING1);
+    voice[v2].velocity = (uint8)(vol * CHORUS_VELOCITY_TUNING2);
+
+    /* Make doubled link v1 and v2 */
+    voice[v1].chorus_link = v2;
+    voice[v2].chorus_link = v1;
+
+    level >>= 2;		     /* scale level to a "better" value */
     if(channel[ch].pitchbend + level < 0x2000)
-        voice[cv].orig_frequency *= bend_fine[level];
+        voice[v2].orig_frequency *= bend_fine[level];
     else
-	voice[cv].orig_frequency /= bend_fine[level];
-    voice[cv].cache = NULL;
+	voice[v2].orig_frequency /= bend_fine[level];
+
+    MYCHECK(voice[v2].orig_frequency);
+
+    voice[v2].cache = NULL;
 
     /* set panning & delay */
-    if(play_mode->encoding & PE_MONO)
-	voice[cv].delay = 0;
-    else
+    if(!(play_mode->encoding & PE_MONO))
     {
 	double delay;
 
-	if(voice[cv].panned == PANNED_CENTER)
+	if(voice[v2].panned == PANNED_CENTER)
 	{
-	    static int cpan[MAX_CHANNELS];
-	    voice[cv].panning = 32 + cpan[ch];
-	    cpan[ch] = (((cpan[ch] + 1) & 63));
-	    delay = DEFAULT_CHORUS_DELAY2;
+	    voice[v2].panning = 64 + int_rand(40) - 20; /* 64 +- rand(20) */
+	    delay = 0;
 	}
 	else
 	{
-	    int panning = voice[cv].panning;
+	    int panning = voice[v2].panning;
 
 	    if(panning < CHORUS_OPPOSITE_THRESHOLD)
 	    {
-		voice[cv].panning = 127;
+		voice[v2].panning = 127;
 		delay = DEFAULT_CHORUS_DELAY1;
 	    }
 	    else if(panning > 127 - CHORUS_OPPOSITE_THRESHOLD)
 	    {
-		voice[cv].panning = 0;
+		voice[v2].panning = 0;
 		delay = DEFAULT_CHORUS_DELAY1;
 	    }
 	    else
 	    {
-		voice[cv].panning = (panning < 64 ? 0 : 127);
+		voice[v2].panning = (panning < 64 ? 0 : 127);
 		delay = DEFAULT_CHORUS_DELAY2;
 	    }
 	}
-	voice[cv].delay = (int)(play_mode->rate * delay);
+	voice[v2].delay += (int)(play_mode->rate * delay);
     }
 
-    recompute_amp(v);
-    apply_envelope_to_amp(v);
-    recompute_amp(cv);
-    apply_envelope_to_amp(cv);
-    recompute_freq(cv);
+    recompute_amp(v1);
+    apply_envelope_to_amp(v1);
+    recompute_amp(v2);
+    apply_envelope_to_amp(v2);
+
+    /* voice[v2].orig_frequency is changed.
+     * Update the depened parameters.
+     */
+    recompute_freq(v2);
+}
+
+/* Yet another chorus implementation
+ *	by Eric A. Welsh <ewelsh@gpc.wustl.edu>.
+ */
+static void new_chorus_voice_alternate(int v1, int level)
+{
+    int v2, ch, panlevel;
+    uint8 vol, pan;
+    double delay;
+	struct chorus_status_t *status = get_chorus_status();
+
+    if((v2 = find_free_voice()) == -1)
+	return;
+    ch = voice[v1].channel;
+    voice[v2] = voice[v1];
+
+	/* NRPN Chorus Send Level of Drum */
+	if(ISDRUMCHANNEL(ch) && channel[ch].drums[voice[v1].note] != NULL) {
+		level *= (FLOAT_T)channel[ch].drums[voice[v1].note]->chorus_level / 127.0;
+	}
+
+    /* for our purposes, hard left will be equal to 1 instead of 0 */
+    pan = voice[v1].panning;
+    if (!pan) pan = 1;
+
+    /* Choose lower voice index for base voice (v1) */
+    if(v1 > v2)
+    {
+	int tmp;
+	tmp = v1;
+	v1 = v2;
+	v2 = v1;
+    }
+
+    /* lower the volumes so that the two notes add to roughly the orig. vol */
+    vol = voice[v1].velocity;
+    voice[v1].velocity  = (uint8)(vol * CHORUS_VELOCITY_TUNING2);
+    voice[v2].velocity  = (uint8)(vol * CHORUS_VELOCITY_TUNING2);
+
+    /* Make doubled link v1 and v2 */
+    voice[v1].chorus_link = v2;
+    voice[v2].chorus_link = v1;
+
+    /* detune notes for chorus effect */
+    level >>= 2;		/* scale to a "better" value */
+    if (level)
+    {
+        if(channel[ch].pitchbend + level < 0x2000)
+            voice[v2].orig_frequency *= bend_fine[level];
+        else
+	    voice[v2].orig_frequency /= bend_fine[level];
+        voice[v2].cache = NULL;
+    }
+
+    MYCHECK(voice[v2].orig_frequency);
+
+    /* Try to keep the delayed voice from cancelling out the other voice */
+    /* Don't bother with trying to figure out drum pitches... */
+    /* Don't bother with mod files for the same reason... */
+    /* Drums and mods could be fixed, but pitch detection is too expensive */
+    delay = DEFAULT_CHORUS_DELAY2;
+    if (!ISDRUMCHANNEL(voice[v1].channel) &&
+    	current_file_info->file_type != IS_MOD_FILE &&
+    	current_file_info->file_type != IS_S3M_FILE)
+    {
+    	double freq, frac;
+    
+    	freq = pitch_freq_table[voice[v1].note];
+    	delay = DEFAULT_CHORUS_DELAY2 * freq;
+    	frac = delay - floor(delay);
+
+	/* force the delay away from 0.5 period */
+    	if (frac < 0.5 && frac > 0.40)
+    	{
+    	    delay = (floor(delay) + 0.40) / freq;
+    	    if (play_mode->encoding & ~PE_MONO)
+    	    	delay += (0.5 - frac) * (1.0 - labs(64 - pan) / 63.0) / freq;
+    	}
+    	else if (frac >= 0.5 && frac < 0.60)
+    	{
+    	    delay = (floor(delay) + 0.60) / freq;
+    	    if (play_mode->encoding & ~PE_MONO)
+    	    	delay += (0.5 - frac) * (1.0 - labs(64 - pan) / 63.0) / freq;
+    	}
+    	else
+    	    delay = DEFAULT_CHORUS_DELAY2;
+    }
+
+    /* set panning & delay for pseudo-surround effect */
+    if(play_mode->encoding & PE_MONO)    /* delay sounds good */
+        voice[v2].delay += (int)(play_mode->rate * delay);
+    else
+    {
+        panlevel = 63;
+        if (pan - panlevel < 1) panlevel = pan - 1;
+        if (pan + panlevel > 127) panlevel = 127 - pan;
+        voice[v1].panning -= panlevel;
+        voice[v2].panning += panlevel;
+
+        /* choose which voice is delayed based on panning */
+        if (voice[v1].panned == PANNED_CENTER) {
+            /* randomly choose which voice is delayed */
+            if (int_rand(2))
+                voice[v1].delay += (int)(play_mode->rate * delay);
+            else
+                voice[v2].delay += (int)(play_mode->rate * delay);
+        }
+        else if (pan - 64 < 0) {
+            voice[v2].delay += (int)(play_mode->rate * delay);
+        }
+        else {
+            voice[v1].delay += (int)(play_mode->rate * delay);
+        }
+    }
+
+    recompute_amp(v1);
+    apply_envelope_to_amp(v1);
+    recompute_amp(v2);
+    apply_envelope_to_amp(v2);
+    if (level) recompute_freq(v2);
 }
 
 static void note_on(MidiEvent *e)
 {
-    int i, nv, v, ch;
+    int i, nv, v, ch, note;
     int vlist[32];
     int vid;
 
     if((nv = find_samples(e, vlist)) == 0)
 	return;
-    vid = new_vidq(e->channel, MIDI_EVENT_NOTE(e));
+    note = MIDI_EVENT_NOTE(e);
+    vid = new_vidq(e->channel, note);
     ch = e->channel;
     for(i = 0; i < nv; i++)
     {
 	v = vlist[i];
+	if(ISDRUMCHANNEL(ch) &&
+	   channel[ch].drums[note] != NULL &&
+	   channel[ch].drums[note]->pan_random)
+	    channel[ch].drums[note]->drum_panning = int_rand(128);
+	else if(channel[ch].pan_random)
+	{
+	    channel[ch].panning = int_rand(128);
+	    ctl_mode_event(CTLE_PANNING, 1, ch, channel[ch].panning);
+	}
 	start_note(e, v, vid, nv - i - 1);
-	if(channel[ch].chorus_level && voice[v].sample->sample_rate)
-	    new_chorus_voice(v, channel[ch].chorus_level);
-    }
+#ifdef SMOOTH_MIXING
+	voice[v].old_left_mix = voice[v].old_right_mix =
+	voice[v].left_mix_inc = voice[v].left_mix_offset =
+	voice[v].right_mix_inc = voice[v].right_mix_offset = 0;
+#endif
+	if((channel[ch].chorus_level || opt_surround_chorus))
+	{
+		if(opt_surround_chorus)
+		new_chorus_voice_alternate(v, channel[ch].chorus_level);
+		else
+		new_chorus_voice(v, channel[ch].chorus_level);
+	}
+	if(channel[ch].delay_level)
+	{
+		new_delay_voice(v, channel[ch].delay_level);
+	}
+	if(channel[ch].resonance_level)
+	{
+		new_flanger_voice(v, channel[ch].cutoff_freq,channel[ch].resonance_level);
+	}
+	}
 }
 
 static void set_voice_timeout(Voice *vp, int ch, int note)
@@ -1281,15 +2178,72 @@ static void adjust_channel_pressure(MidiEvent *e)
 
 static void adjust_panning(int c)
 {
-  int i, uv = upper_voices, pan = channel[c].panning;
-  for(i = 0; i < uv; i++)
-    if ((voice[i].channel==c) &&
-	(voice[i].status & (VOICE_ON | VOICE_SUSTAINED)))
-      {
-	voice[i].panning = pan;
-	recompute_amp(i);
-	apply_envelope_to_amp(i);
-      }
+    int i, uv = upper_voices, pan = channel[c].panning;
+    for(i = 0; i < uv; i++)
+    {
+	if ((voice[i].channel==c) &&
+	    (voice[i].status & (VOICE_ON | VOICE_SUSTAINED)))
+	{
+            /* adjust pan to include drum/sample pan offsets */
+            if(ISDRUMCHANNEL(c) &&
+               channel[c].drums[i] != NULL &&
+               channel[c].drums[i]->drum_panning != NO_PANNING)
+                pan += channel[c].drums[i]->drum_panning - 64;
+            else
+                pan += voice[i].sample->panning - 64;
+            if (pan > 127) pan = 127;
+            if (pan < 0) pan = 0;
+
+	    /* Hack to handle -EFchorus=2 in a "reasonable" way */
+	    if((channel[c].chorus_level || opt_surround_chorus) &&
+	       voice[i].chorus_link != i)
+	    {
+		int v1, v2;
+
+		if(i >= voice[i].chorus_link)
+		    /* `i' is not base chorus voice.
+		     *  This sub voice is already updated.
+		     */
+		    continue;
+
+		v1 = i;				/* base voice */
+		v2 = voice[i].chorus_link;	/* sub voice (detuned) */
+
+		if(opt_surround_chorus) /* Surround chorus mode by Eric. */
+		{
+		    int panlevel;
+
+		    if (!pan) pan = 1;	/* make hard left be 1 instead of 0 */
+		    panlevel = 63;
+		    if (pan - panlevel < 1) panlevel = pan - 1;
+		    if (pan + panlevel > 127) panlevel = 127 - pan;
+		    voice[v1].panning = pan - panlevel;
+		    voice[v2].panning = pan + panlevel;
+		}
+		else
+		{
+		    voice[v1].panning = pan;
+		    if(pan > 60 && pan < 68) /* PANNED_CENTER */
+			voice[v2].panning =
+			    64 + int_rand(40) - 20; /* 64 +- rand(20) */
+		    else if(pan < CHORUS_OPPOSITE_THRESHOLD)
+			voice[v2].panning = 127;
+		    else if(pan > 127 - CHORUS_OPPOSITE_THRESHOLD)
+			voice[v2].panning = 0;
+		    else
+			voice[v2].panning = (pan < 64 ? 0 : 127);
+		}
+		recompute_amp(v2);
+		apply_envelope_to_amp(v2);
+		/* v1 == i, so v1 will be updated next */
+	    }
+	    else
+		voice[i].panning = pan;
+
+	    recompute_amp(i);
+	    apply_envelope_to_amp(i);
+	}
+    }
 }
 
 static void play_midi_setup_drums(int ch, int note)
@@ -1309,6 +2263,12 @@ static void adjust_drum_panning(int ch, int note)
     pan = channel[ch].drums[note]->drum_panning;
     if(pan == 0xFF)
 	return;
+
+    /* slide the pan by the channel pan offset */
+    if(channel[ch].panning != NO_PANNING)
+        pan += channel[ch].panning - 64;
+    if (pan > 127) pan = 127;
+    if (pan < 0) pan = 0;
 
     for(i = 0; i < uv; i++)
 	if(voice[i].channel == ch &&
@@ -1351,18 +2311,36 @@ static void adjust_volume(int c)
 
 static void set_reverb_level(int ch, int level)
 {
-    struct ReverbControls *rb;
+    if(opt_reverb_control <= 0)
+    {
+	channel[ch].reverb_level = channel[ch].reverb_id =
+	    -opt_reverb_control;
+	make_rvid_flag = 1;
+	return;
+    }
+    channel[ch].reverb_level = level;
+    make_rvid_flag = 0;	/* to update reverb_id */
+}
 
-    rb = &reverb_ctls[ch];
-    rb->lastin = 0;
-    rb->level = level;
-    rb->rvid = ch;
-    make_rvid_flag = 0;
+int get_reverb_level(int ch)
+{
+    if(opt_reverb_control <= 0)
+	return -opt_reverb_control;
 
-    if(level == 0 || !opt_reverb_control)
-	channel[ch].rb = NULL;
-    else
-	channel[ch].rb = rb;
+    if(channel[ch].reverb_level == -1)
+	return DEFAULT_REVERB_SEND_LEVEL;
+    return channel[ch].reverb_level;
+}
+
+int get_chorus_level(int ch)
+{
+#ifdef DISALLOW_DRUM_BENDS
+    if(ISDRUMCHANNEL(ch))
+	return 0; /* Not supported drum channel chorus */
+#endif
+    if(opt_chorus_control == 1)
+	return channel[ch].chorus_level;
+    return -opt_chorus_control;
 }
 
 static void make_rvid(void)
@@ -1371,24 +2349,26 @@ static void make_rvid(void)
 
     for(maxrv = MAX_CHANNELS - 1; maxrv >= 0; maxrv--)
     {
-	if(reverb_ctls[maxrv].level != 0)
+	if(channel[maxrv].reverb_level == -1)
+	    channel[maxrv].reverb_id = -1;
+	else if(channel[maxrv].reverb_level >= 0)
 	    break;
-	reverb_ctls[maxrv].rvid = maxrv;
     }
 
-    /* collect same reverb level */
-    reverb_ctls[0].rvid = 0;
-    for(i = 1; i <= maxrv; i++)
+    /* collect same reverb level. */
+    for(i = 0; i <= maxrv; i++)
     {
-	lv = reverb_ctls[i].level;
-	reverb_ctls[i].rvid = i;
-	if(lv == 0)
+	if((lv = channel[i].reverb_level) == -1)
+	{
+	    channel[i].reverb_id = -1;
 	    continue;
+	}
+	channel[i].reverb_id = i;
 	for(j = 0; j < i; j++)
 	{
-	    if(reverb_ctls[j].level == lv)
+	    if(channel[j].reverb_level == lv)
 	    {
-		reverb_ctls[i].rvid = j;
+		channel[i].reverb_id = j;
 		break;
 	    }
 	}
@@ -1418,7 +2398,7 @@ int midi_drumpart_change(int ch, int isdrum)
     return 1;
 }
 
-static void midi_program_change(int ch, int prog)
+void midi_program_change(int ch, int prog)
 {
     int newbank, dr;
 
@@ -1450,16 +2430,20 @@ static void midi_program_change(int ch, int prog)
 	  default:
 	    break;
 	}
-	if(channel[ch].bank_msb >= 0)
-	    newbank = channel[ch].bank_msb;
+	newbank = channel[ch].bank_msb;
 	break;
 
       case XG_SYSTEM_MODE: /* XG */
 	switch(channel[ch].bank_msb)
 	{
 	  case 0: /* Normal */
-	    midi_drumpart_change(ch, 0);
-	    channel[ch].mapID = XG_NORMAL_MAP;
+	    if(ch == 9  && channel[ch].bank_lsb == 127 && channel[ch].mapID == XG_DRUM_MAP) {
+	      /* FIXME: Why this part is drum?  Is this correct? */
+	      ;
+	    } else {
+	      midi_drumpart_change(ch, 0);
+	      channel[ch].mapID = XG_NORMAL_MAP;
+	    }
 	    break;
 	  case 64: /* SFX voice */
 	    midi_drumpart_change(ch, 0);
@@ -1476,23 +2460,23 @@ static void midi_program_change(int ch, int prog)
 	  default:
 	    break;
 	}
-	if(channel[ch].bank_lsb >= 0)
-	    newbank = channel[ch].bank_lsb;
+	dr = ISDRUMCHANNEL(ch);
+	newbank = channel[ch].bank_lsb;
 	break;
 
       default:
-	if(channel[ch].bank_msb >= 0)
-	    newbank = channel[ch].bank_msb;
+	newbank = channel[ch].bank_msb;
 	break;
     }
 
     if(dr)
     {
 	channel[ch].bank = prog; /* newbank is ignored */
-	if(drumset[prog] == NULL)
+	if(drumset[prog] == NULL || drumset[prog]->alt == NULL)
 	    channel[ch].altassign = drumset[0]->alt;
 	else
 	    channel[ch].altassign = drumset[prog]->alt;
+	ctl_mode_event(CTLE_DRUMPART, 1, ch, 1);
     }
     else
     {
@@ -1500,8 +2484,23 @@ static void midi_program_change(int ch, int prog)
 	    newbank = special_tonebank;
 	channel[ch].bank = newbank;
 	channel[ch].altassign = NULL;
+	ctl_mode_event(CTLE_DRUMPART, 1, ch, 0);
     }
-    channel[ch].program = prog;
+
+    if(!dr && default_program[ch] == SPECIAL_PROGRAM)
+      channel[ch].program = SPECIAL_PROGRAM;
+    else
+      channel[ch].program = prog;
+
+    if(opt_realtime_playing == 2 && !dr && (play_mode->flag & PF_PCM_STREAM))
+    {
+	int b, p;
+
+	p = prog;
+	b = channel[ch].bank;
+	instrument_map(channel[ch].mapID, &b, &p);
+	play_midi_load_instrument(0, b, p);
+    }
 }
 
 static void play_midi_prescan(MidiEvent *ev)
@@ -1521,7 +2520,8 @@ static void play_midi_prescan(MidiEvent *ev)
 	switch(ev->type)
 	{
 	  case ME_NOTEON:
-	    if(channel[ch].portamento_time == 0 ||
+	    if((channel[ch].portamento_time_msb |
+		channel[ch].portamento_time_lsb) == 0 ||
 	       channel[ch].portamento == 0)
 	    {
 		int nv;
@@ -1543,12 +2543,16 @@ static void play_midi_prescan(MidiEvent *ev)
 	    resamp_cache_refer_off(ch, MIDI_EVENT_NOTE(ev), ev->time);
 	    break;
 
-	  case ME_PORTAMENTO_TIME:
-	    channel[ch].portamento_time = ev->a + ev->b * 128;
+	  case ME_PORTAMENTO_TIME_MSB:
+	    channel[ch].portamento_time_msb = ev->a;
+	    break;
+
+	  case ME_PORTAMENTO_TIME_LSB:
+	    channel[ch].portamento_time_lsb = ev->a;
 	    break;
 
 	  case ME_PORTAMENTO:
-	    channel[ch].portamento = ev->a;
+	    channel[ch].portamento = (ev->a >= 64);
 
 	  case ME_RESET_CONTROLLERS:
 	    reset_controllers(ch);
@@ -1661,6 +2665,8 @@ static int last_rpn_addr(int ch)
 	return -1;
     lsb = channel[ch].lastlrpn;
     msb = channel[ch].lastmrpn;
+    if(lsb == 0xff || msb == 0xff)
+	return -1;
     addr = (msb << 8 | lsb);
     if(channel[ch].nrpn)
 	addrmap = nrpn_addr_map;
@@ -1704,41 +2710,84 @@ static void update_rpn_map(int ch, int addr, int update_now)
 	    update_channel_freq(ch);
 	break;
       case NRPN_ADDR_0120:	/* Filter cutoff frequency */
+	if(opt_resonance) {
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Pseudo Cutoff Freq (CH:%d VALUE:%d)",ch,val);
+		channel[ch].cutoff_freq = val - 64;
+	}
 	break;
       case NRPN_ADDR_0121:	/* Filter Resonance */
+	if(opt_resonance) {
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Pseudo Resonance (CH:%d VALUE:%d)",ch,val);
+		channel[ch].resonance_level = val - 64;
+	}
 	break;
       case NRPN_ADDR_0163:	/* Attack Time */
+	if(!opt_tva_attack) {break;}
+	set_envelope_time(ch,val,0);
 	break;
       case NRPN_ADDR_0164:	/* EG Decay Time */
+	if(!opt_tva_decay) { break; }
+	set_envelope_time(ch,val,1);
 	break;
       case NRPN_ADDR_0166:	/* EG Release Time */
+	if(!opt_tva_release) { break; }
+	set_envelope_time(ch,val,3);
 	break;
       case NRPN_ADDR_1400:	/* Drum Filter Cutoff (XG) */
 	if(play_system_mode != GS_SYSTEM_MODE)
-	    drumflag = 1;
+	drumflag = 1;
 	break;
       case NRPN_ADDR_1500:	/* Drum Filter Resonance (XG) */
 	if(play_system_mode != GS_SYSTEM_MODE)
-	    drumflag = 1;
+	drumflag = 1;
 	break;
       case NRPN_ADDR_1600:	/* Drum EG Attack Time (XG) */
 	if(play_system_mode != GS_SYSTEM_MODE)
-	    drumflag = 1;
+	drumflag = 1;
+	if(!opt_tva_attack) { break; }
+	val = val & 0x7F;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	val	-= 64;
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"XG Drum Attack Time (CH:%d NOTE:%d VALUE:%d)",ch,note,val);
+	channel[ch].drums[note]->drum_envelope_rate[0] = val / 2;
 	break;
       case NRPN_ADDR_1700:	/* Drum EG Decay Time (XG) */
 	if(play_system_mode != GS_SYSTEM_MODE)
-	    drumflag = 1;
+    drumflag = 1;
+	if(!opt_tva_decay) { break; }
+	val = val & 0x7F;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	val	-= 64;
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"XG Drum Decay Time (CH:%d NOTE:%d VALUE:%d)",ch,note,val);
+	channel[ch].drums[note]->drum_envelope_rate[1] = val / 2;
 	break;
-      case NRPN_ADDR_1800:	/* Coarse Pitch of Drum (GS)
-				   Fine Pitch of Drum (XG) */
+      case NRPN_ADDR_1800:	/* Coarse Pitch of Drum (GS) */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Coarse Pitch of Drum (CH:%d VALUE:%d)",ch,val);
+	drumflag = 1;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	val = val - 64 + note;
+	val = val & 0x7F;
+	channel[ch].drums[note]->note = val;
+	break;
+      case NRPN_ADDR_1900:	/* Fine Pitch of Drum (XG) */
+  	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Fine Pitch of Drum (CH:%d VALUE:%d)",ch,val);
 	drumflag = 1;
 	break;
-      case NRPN_ADDR_1900:	/* Coarse Pitch of Drum (XG) */
-	if(play_system_mode != GS_SYSTEM_MODE)
-	    drumflag = 1;
-	break;
-      case NRPN_ADDR_1A00:	/* Level of Drum */
+      case NRPN_ADDR_1A00:	/* Level of Drum */	 
 	drumflag = 1;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	if(val > 127) {val = 127;}
+	else if(val < 0) {val = 0;}
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Drum Instrument TVA Level (CH:%d NOTE:%d VALUE:%d)",ch,note,val);
+	channel[ch].drums[note]->drum_level = (double)val / 127;
 	break;
       case NRPN_ADDR_1C00:	/* Panpot of Drum */
 	drumflag = 1;
@@ -1746,27 +2795,51 @@ static void update_rpn_map(int ch, int addr, int update_now)
 	if(channel[ch].drums[note] == NULL)
 	    play_midi_setup_drums(ch, note);
 	if(val == 0)
+	{
 	    val = int_rand(128);
+	    channel[ch].drums[note]->pan_random = 1;
+	}
+	else
+	    channel[ch].drums[note]->pan_random = 0;
 	channel[ch].drums[note]->drum_panning = val;
-	if(update_now)
+	if(update_now && adjust_panning_immediately && !channel[ch].pan_random)
 	    adjust_drum_panning(ch, note);
 	break;
       case NRPN_ADDR_1D00:	/* Reverb Send Level of Drum */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Reverb Send Level of Drum (CH:%d VALUE:%d)",ch,val);
 	drumflag = 1;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	channel[ch].drums[note]->reverb_level = val;
 	break;
       case NRPN_ADDR_1E00:	/* Chorus Send Level of Drum */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Chorus Send Level of Drum (CH:%d VALUE:%d)",ch,val);
 	drumflag = 1;
+	note = channel[ch].lastlrpn;		
+
+	if(channel[ch].drums[note] == NULL) {break;}
+	channel[ch].drums[note]->chorus_level = val;
 	break;
       case NRPN_ADDR_1F00:	/* Variation Send Level of Drum */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Variation Send Level of Drum (CH:%d VALUE:%d)",ch,val);
 	drumflag = 1;
+	note = channel[ch].lastlrpn;
+
+	if(channel[ch].drums[note] == NULL) {break;}
+
+	channel[ch].drums[note]->delay_level = val;
 	break;
       case RPN_ADDR_0000: /* Pitch bend sensitivity */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Pitch Bend Sensitivity (CH:%d VALUE:%d)",ch,val);
 	channel[ch].pitchfactor = 0;
 	break;
-      case RPN_ADDR_0001:
+      case RPN_ADDR_0001: /* Master Fine Tuning */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Master Fine Tuning (CH:%d VALUE:%d)",ch,val);
 	channel[ch].pitchfactor = 0;
 	break;
-      case RPN_ADDR_0002:
+      case RPN_ADDR_0002: /* Master Coarse Tuning */
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Master Coarse Tuning (CH:%d VALUE:%d)",ch,val);
 	channel[ch].pitchfactor = 0;
 	break;
       case RPN_ADDR_7F7F: /* RPN reset */
@@ -1784,6 +2857,7 @@ static void update_rpn_map(int ch, int addr, int update_now)
 	channel[ch].pitchfactor = 0;
 	break;
     }
+
     if(drumflag && midi_drumpart_change(ch, 1))
     {
 	midi_program_change(ch, channel[ch].program);
@@ -1820,7 +2894,8 @@ static void seek_forward(int32 until_time)
 	    break;
 
 	  case ME_PAN:
-	    channel[ch].panning=current_event->a;
+	    channel[ch].panning = current_event->a;
+	    channel[ch].pan_random = 0;
 	    break;
 
 	  case ME_EXPRESSION:
@@ -1832,7 +2907,7 @@ static void seek_forward(int32 until_time)
 	    break;
 
 	  case ME_SUSTAIN:
-	    channel[ch].sustain=current_event->a;
+	    channel[ch].sustain = (current_event->a >= 64);
 	    break;
 
 	  case ME_RESET_CONTROLLERS:
@@ -1848,17 +2923,25 @@ static void seek_forward(int32 until_time)
 	    break;
 
 	  case ME_MODULATION_WHEEL:
+		if(play_system_mode == XG_SYSTEM_MODE) {
+			current_event->a *= 1.2;
+		} else if(channel[ch].mapID == SC_55_TONE_MAP) {
+			current_event->a *= 0.7;
+		}
 	    channel[ch].modulation_wheel =
 		midi_cnv_vib_depth(current_event->a);
 	    break;
 
-	  case ME_PORTAMENTO_TIME:
-	    channel[ch].portamento_time =
-		current_event->a + current_event->b * 128;
+	  case ME_PORTAMENTO_TIME_MSB:
+	    channel[ch].portamento_time_msb = current_event->a;
+	    break;
+
+	  case ME_PORTAMENTO_TIME_LSB:
+	    channel[ch].portamento_time_lsb = current_event->a;
 	    break;
 
 	  case ME_PORTAMENTO:
-	    channel[ch].portamento = current_event->a;
+	    channel[ch].portamento = (current_event->a >= 64);
 	    break;
 
 	  case ME_MONO:
@@ -1911,8 +2994,7 @@ static void seek_forward(int32 until_time)
 		break;
 	    if((i = last_rpn_addr(ch)) >= 0)
 	    {
-		channel[ch].rpnmap[i] =
-		    current_event->a;
+		channel[ch].rpnmap[i] = current_event->a;
 		update_rpn_map(ch, i, 0);
 	    }
 	    break;
@@ -1928,17 +3010,40 @@ static void seek_forward(int32 until_time)
 	    break;
 
 	  case ME_CHORUS_EFFECT:
-	    if(opt_chorus_control)
-	    {
-		if(opt_chorus_control == 1)
-		    channel[ch].chorus_level = current_event->a;
-		else
-		    channel[ch].chorus_level = opt_chorus_control;
-	    }
+	    if(opt_chorus_control == 1)
+		channel[ch].chorus_level = current_event->a;
+	    else
+		channel[ch].chorus_level = -opt_chorus_control;
 	    break;
+
+	  case ME_TREMOLO_EFFECT:
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Tremolo Send (CH:%d LEVEL:%d)",ch,current_event->a);
+		break;
+
+	  case ME_CELESTE_EFFECT:
+		if(opt_chorus_control) {
+			channel[ch].delay_level = current_event->a;
+			ctl->cmsg(CMSG_INFO,VERB_NOISY,"Delay Send (CH:%d LEVEL:%d)",ch,current_event->a);
+		}
+	    break;
+
+	  case ME_ATTACK_TIME:
+	  	if(!opt_tva_attack) { break; }
+		set_envelope_time(ch,current_event->a,0);
+		break;
+
+	  case ME_RELEASE_TIME:
+	  	if(!opt_tva_release) { break; }
+		set_envelope_time(ch,current_event->a,3);
+		break;
+
+	  case ME_PHASER_EFFECT:
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Phaser Send (CH:%d LEVEL:%d)",ch,current_event->a);
+		break;
 
 	  case ME_RANDOM_PAN:
 	    channel[ch].panning = int_rand(128);
+	    channel[ch].pan_random = 1;
 	    break;
 
 	  case ME_SET_PATCH:
@@ -1950,7 +3055,6 @@ static void seek_forward(int32 until_time)
 	  case ME_TEMPO:
 	    current_play_tempo = ch +
 		current_event->b * 256 + current_event->a * 65536;
-	    play_tempo_offset = current_event->time;
 	    break;
 
 	  case ME_RESET:
@@ -1959,13 +3063,20 @@ static void seek_forward(int32 until_time)
 	    break;
 
 	  case ME_PATCH_OFFS:
-	    if(special_patch[ch] != NULL)
-		special_patch[ch]->sample_offset =
+	    i = channel[ch].special_sample;
+	    if(special_patch[i] != NULL)
+		special_patch[i]->sample_offset =
 		    (current_event->a | 256 * current_event->b);
 	    break;
 
 	  case ME_WRD:
 	    wrd_midi_event(ch, current_event->a | 256 * current_event->b);
+	    break;
+
+	  case ME_SHERRY:
+	    wrd_sherry_event(ch |
+			     (current_event->a<<8) |
+			     (current_event->b<<16));
 	    break;
 
 	  case ME_DRUMPART:
@@ -2002,7 +3113,6 @@ static void skip_to(int32 until_time)
   if (current_sample > until_time)
     current_sample=0;
 
-  init_reverb(play_mode->rate);
   change_system_mode(DEFAULT_SYSTEM_MODE);
   reset_midi(0);
 
@@ -2010,12 +3120,11 @@ static void skip_to(int32 until_time)
   buffer_pointer=common_buffer;
   current_event=event_list;
   current_play_tempo = 500000; /* 120 BPM */
-  play_tempo_offset = 0;
+
   if (until_time)
     seek_forward(until_time);
   for(ch = 0; ch < MAX_CHANNELS; ch++)
-      if(channel[ch].rb != NULL)
-	  channel[ch].rb->lastin = 0;
+      channel[ch].lasttime = current_sample;
 
   ctl_mode_event(CTLE_RESET, 0, 0, 0);
   trace_offset(until_time);
@@ -2036,10 +3145,78 @@ static int32 sync_restart(int only_trace_ok)
 	    return -1;
 	cur = current_sample;
     }
-    play_mode->purge_output();
-    data_output_count = 0;
+    aq_flush(1);
     skip_to(cur);
     return cur;
+}
+
+static int playmidi_change_rate(int32 rate, int restart)
+{
+    int arg;
+
+    if(rate == play_mode->rate)
+	return 1; /* Not need to change */
+
+    if(rate < MIN_OUTPUT_RATE || rate > MAX_OUTPUT_RATE)
+    {
+	ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
+		  "Out of sample rate: %d", rate);
+	return -1;
+    }
+
+    if(restart)
+    {
+	if((midi_restart_time = current_trace_samples()) == -1)
+	    midi_restart_time = current_sample;
+    }
+    else
+	midi_restart_time = 0;
+
+    arg = (int)rate;
+    if(play_mode->acntl(PM_REQ_RATE, &arg) == -1)
+    {
+	ctl->cmsg(CMSG_ERROR, VERB_NORMAL,
+		  "Can't change sample rate to %d", rate);
+	return -1;
+    }
+
+    aq_flush(1);
+    aq_setup();
+    aq_set_soft_queue(-1.0, -1.0);
+    free_instruments(1);
+#ifdef SUPPORT_SOUNDSPEC
+    soundspec_reinit();
+#endif /* SUPPORT_SOUNDSPEC */
+    return 0;
+}
+
+void playmidi_output_changed(int play_state)
+{
+    if(target_play_mode == NULL)
+	return;
+    play_mode = target_play_mode;
+
+    if(play_state == 0)
+    {
+	/* Playing */
+	if((midi_restart_time = current_trace_samples()) == -1)
+	    midi_restart_time = current_sample;
+    }
+    else /* Not playing */
+	midi_restart_time = 0;
+
+    if(play_state != 2)
+    {
+	aq_flush(1);
+	aq_setup();
+	aq_set_soft_queue(-1.0, -1.0);
+	clear_magic_instruments();
+    }
+    free_instruments(1);
+#ifdef SUPPORT_SOUNDSPEC
+    soundspec_reinit();
+#endif /* SUPPORT_SOUNDSPEC */
+    target_play_mode = NULL;
 }
 
 int check_apply_control(void)
@@ -2063,12 +3240,11 @@ int check_apply_control(void)
 	ctl_mode_event(CTLE_MASTER_VOLUME, 0, amplification, 0);
 	break;
       case RC_SYNC_RESTART:
-	play_mode->purge_output();
-	data_output_count = 0;
-	trace_flush();
+	aq_flush(1);
 	break;
       case RC_TOGGLE_PAUSE:
 	play_pause_flag = !play_pause_flag;
+	ctl_pause_event(play_pause_flag, 0);
 	return RC_NONE;
       case RC_TOGGLE_SNDSPEC:
 #ifdef SUPPORT_SOUNDSPEC
@@ -2085,6 +3261,13 @@ int check_apply_control(void)
 	    soundspec_update_wave(NULL, -1);
 	return RC_NONE;
 #endif /* SUPPORT_SOUNDSPEC */
+      case RC_CHANGE_RATE:
+	if(playmidi_change_rate(val, 0))
+	    return RC_NONE;
+	return RC_RELOAD;
+      case RC_OUTPUT_CHANGED:
+	playmidi_output_changed(1);
+	return RC_RELOAD;
     }
     return rc;
 }
@@ -2096,8 +3279,12 @@ static void voice_increment(int n)
     {
 	if(voices == MAX_VOICES)
 	    break;
-	voice[voices++].status = VOICE_FREE;
+	voice[voices].status = VOICE_FREE;
+	voice[voices].chorus_link = voices;
+	voices++;
     }
+    if(n > 0)
+	ctl_mode_event(CTLE_MAXVOICES, 1, voices, 0);
 }
 
 static void voice_decrement(int n)
@@ -2143,7 +3330,7 @@ static void voice_decrement(int n)
 	if(lowest != -1)
 	{
 	    cut_notes++;
-	    voice[lowest].status = VOICE_FREE;
+	    free_voice(lowest);
 	    ctl_note_event(lowest);
 	    voice[lowest] = voice[voices];
 	}
@@ -2152,7 +3339,83 @@ static void voice_decrement(int n)
     }
     if(upper_voices > voices)
 	upper_voices = voices;
+    if(n > 0)
+	ctl_mode_event(CTLE_MAXVOICES, 1, voices, 0);
 }
+
+/* EAW -- do not throw away good notes, stop decrementing */
+static void voice_decrement_conservative(int n)
+{
+    int i, j, lowest, finalnv;
+    int32 lv, v;
+
+    /* decrease voice */
+    finalnv = voices - n;
+    for(i = 1; i <= n && voices > 0; i++)
+    {
+	if(voice[voices-1].status == VOICE_FREE) {
+	    voices--;
+	    continue;	/* found */
+	}
+
+	for(j = 0; j < finalnv; j++)
+	    if(voice[j].status == VOICE_FREE)
+		break;
+	if(j != finalnv)
+	{
+	    voice[j] = voice[voices-1];
+	    voices--;
+	    continue;	/* found */
+	}
+
+	/* Look for the decaying note with the lowest volume */
+	lv = 0x7FFFFFFF;
+	lowest = -1;
+	for(j = 0; j < voices; j++)
+	{
+	    if(voice[j].status & ~(VOICE_ON | VOICE_DIE) &&
+	       !(voice[j].sample->note_to_use &&
+	         ISDRUMCHANNEL(voice[j].channel)))
+	    {
+		v = voice[j].left_mix;
+		if((voice[j].panned==PANNED_MYSTERY) &&
+		   (voice[j].right_mix > v))
+		    v = voice[j].right_mix;
+		if(v < lv)
+		{
+		    lv = v;
+		    lowest = j;
+		}
+	    }
+	}
+
+	if(lowest != -1)
+	{
+	    voices--;
+	    cut_notes++;
+	    free_voice(lowest);
+	    ctl_note_event(lowest);
+	    voice[lowest] = voice[voices];
+	}
+	else break;
+    }
+    if(upper_voices > voices)
+	upper_voices = voices;
+}
+
+void restore_voices(int save_voices)
+{
+#ifdef REDUCE_VOICE_TIME_TUNING
+    static int old_voices = -1;
+    if(old_voices == -1 || save_voices)
+	old_voices = voices;
+    else if (voices < old_voices)
+	voice_increment(old_voices - voices);
+    else
+	voice_decrement(voices - old_voices);
+#endif /* REDUCE_VOICE_TIME_TUNING */
+}
+	
 
 static int apply_controls(void)
 {
@@ -2165,13 +3428,13 @@ static int apply_controls(void)
     {
 	switch(rc=ctl->read(&val))
 	{
+	  case RC_STOP:
 	  case RC_QUIT:		/* [] */
 	  case RC_LOAD_FILE:
 	  case RC_NEXT:		/* >>| */
 	  case RC_REALLY_PREVIOUS: /* |<< */
-	    play_mode->purge_output();
-	    data_output_count = 0;
-	    trace_flush();
+	  case RC_TUNE_END:	/* skip */
+	    aq_flush(1);
 	    return rc;
 
 	  case RC_CHANGE_VOLUME:
@@ -2198,48 +3461,82 @@ static int apply_controls(void)
 	    continue;
 
 	  case RC_PREVIOUS:	/* |<< */
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    aq_flush(1);
 	    if (current_sample < 2*play_mode->rate)
 		return RC_REALLY_PREVIOUS;
 	    return RC_RESTART;
 
 	  case RC_RESTART:	/* |<< */
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    if(play_pause_flag)
+	    {
+		midi_restart_time = 0;
+		ctl_pause_event(1, 0);
+		continue;
+	    }
+	    aq_flush(1);
 	    skip_to(0);
+	    ctl_updatetime(0);
 	    jump_flag = 1;
+		midi_restart_time = 0;
 	    continue;
 
 	  case RC_JUMP:
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    if(play_pause_flag)
+	    {
+		midi_restart_time = val;
+		ctl_pause_event(1, val);
+		continue;
+	    }
+	    aq_flush(1);
 	    if (val >= sample_count)
-		return RC_NEXT;
+		return RC_TUNE_END;
 	    skip_to(val);
+	    ctl_updatetime(val);
 	    return rc;
 
 	  case RC_FORWARD:	/* >> */
+	    if(play_pause_flag)
+	    {
+		midi_restart_time += val;
+		if(midi_restart_time > sample_count)
+		    midi_restart_time = sample_count;
+		ctl_pause_event(1, midi_restart_time);
+		continue;
+	    }
 	    cur = current_trace_samples();
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    aq_flush(1);
 	    if(cur == -1)
 		cur = current_sample;
 	    if(val + cur >= sample_count)
-		return RC_NEXT;
+		return RC_TUNE_END;
 	    skip_to(val + cur);
+	    ctl_updatetime(val + cur);
 	    return RC_JUMP;
 
 	  case RC_BACK:		/* << */
+	    if(play_pause_flag)
+	    {
+		midi_restart_time -= val;
+		if(midi_restart_time < 0)
+		    midi_restart_time = 0;
+		ctl_pause_event(1, midi_restart_time);
+		continue;
+	    }
 	    cur = current_trace_samples();
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    aq_flush(1);
 	    if(cur == -1)
 		cur = current_sample;
 	    if(cur > val)
+	    {
 		skip_to(cur - val);
+		ctl_updatetime(cur - val);
+	    }
 	    else
+	    {
 		skip_to(0);
+		ctl_updatetime(0);
+		midi_restart_time = 0;
+	    }
 	    return RC_JUMP;
 
 	  case RC_TOGGLE_PAUSE:
@@ -2253,10 +3550,10 @@ static int apply_controls(void)
 		midi_restart_time = current_trace_samples();
 		if(midi_restart_time == -1)
 		    midi_restart_time = current_sample;
-		play_mode->purge_output();
-		data_output_count = 0;
+		aq_flush(1);
 		play_pause_flag = 1;
 	    }
+	    ctl_pause_event(play_pause_flag, midi_restart_time);
 	    jump_flag = 1;
 	    continue;
 
@@ -2290,21 +3587,25 @@ static int apply_controls(void)
 	    continue;
 
 	  case RC_VOICEINCR:
+	    restore_voices(0);
 	    voice_increment(val);
 	    if(sync_restart(1) != -1)
 		jump_flag = 1;
+	    restore_voices(1);
 	    continue;
 
 	  case RC_VOICEDECR:
+	    restore_voices(0);
 	    if(sync_restart(1) != -1)
 	    {
 		voices -= val;
 		if(voices < 0)
 		    voices = 0;
 		jump_flag = 1;
-		continue;
 	    }
-	    voice_decrement(val);
+	    else
+		voice_decrement(val);
+	    restore_voices(1);
 	    continue;
 
 	  case RC_TOGGLE_DRUMCHAN:
@@ -2323,8 +3624,7 @@ static int apply_controls(void)
 		SET_CHANNELMASK(drumchannels, val);
 		SET_CHANNELMASK(current_file_info->drumchannels, val);
 	    }
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    aq_flush(1);
 	    return RC_RELOAD;
 
 	  case RC_TOGGLE_SNDSPEC:
@@ -2361,56 +3661,70 @@ static int apply_controls(void)
 	    midi_restart_time = current_trace_samples();
 	    if(midi_restart_time == -1)
 		midi_restart_time = current_sample;
-	    play_mode->purge_output();
-	    data_output_count = 0;
+	    aq_flush(1);
+	    return RC_RELOAD;
+
+	  case RC_CHANGE_RATE:
+	    if(playmidi_change_rate(val, 1))
+		return RC_NONE;
+	    return RC_RELOAD;
+
+	  case RC_OUTPUT_CHANGED:
+	    playmidi_output_changed(0);
 	    return RC_RELOAD;
 	}
+	if(intr)
+	    return RC_QUIT;
 	if(play_pause_flag)
-#ifdef HAVE_USLEEP
 	    usleep(300000);
-#else
-	sleep(1);
-#endif
     } while (rc != RC_NONE || play_pause_flag);
     return jump_flag ? RC_JUMP : RC_NONE;
 }
 
-static void do_compute_data(int32 count)
+static void do_compute_data_midi(int32 count)
 {
     int i, uv, stereo, n;
     int32 *vpblist[MAX_CHANNELS];
     int vc[MAX_CHANNELS];
+    int channel_reverb;
 
-    play_mode->play_loop();
-    trace_loop();
     stereo = !(play_mode->encoding & PE_MONO);
     n = (stereo ? (count * 8) : (count * 4)); /* in bytes */
+    channel_reverb = (opt_reverb_control == 1 &&
+		      stereo); /* Don't supported in mono */
     memset(buffer_pointer, 0, n);
 
-    if(!make_rvid_flag)
-    {
-	make_rvid();
-	make_rvid_flag = 1;
-    }
+    uv = upper_voices;
+    for(i = 0; i < uv; i++)
+	if(voice[i].status != VOICE_FREE)
+	    channel[voice[i].channel].lasttime = current_sample + count;
 
-    if(stereo)
+    if(channel_reverb)
     {
 	int chbufidx;
+
+	if(!make_rvid_flag)
+	{
+	    make_rvid();
+	    make_rvid_flag = 1;
+	}
 
 	chbufidx = 0;
 	for(i = 0; i < MAX_CHANNELS; i++)
 	{
 	    vc[i] = 0;
-	    if(channel[i].rb != NULL && channel[i].rb->lastin != 0)
+
+	    if(channel[i].reverb_id != -1 &&
+	       current_sample - channel[i].lasttime < REVERB_MAX_DELAY_OUT)
 	    {
-		if(channel_buffer == NULL)
-		    channel_buffer =
+		if(reverb_buffer == NULL)
+		    reverb_buffer =
 			(char *)safe_malloc(MAX_CHANNELS*AUDIO_BUFFER_SIZE*8);
-		if(channel[i].rb->rvid < i)
-		    vpblist[i] = vpblist[channel[i].rb->rvid];
+		if(channel[i].reverb_id != i)
+		    vpblist[i] = vpblist[channel[i].reverb_id];
 		else
 		{
-		    vpblist[i] = (int32 *)(channel_buffer + chbufidx);
+		    vpblist[i] = (int32 *)(reverb_buffer + chbufidx);
 		    chbufidx += n;
 		}
 	    }
@@ -2418,17 +3732,16 @@ static void do_compute_data(int32 count)
 		vpblist[i] = buffer_pointer;
 	}
 	if(chbufidx)
-	    memset(channel_buffer, 0, chbufidx);
+	    memset(reverb_buffer, 0, chbufidx);
     }
 
-    uv = upper_voices;
     for(i = 0; i < uv; i++)
     {
 	if(voice[i].status != VOICE_FREE)
 	{
 	    int32 *vpb;
 
-	    if(stereo)
+	    if(channel_reverb)
 	    {
 		int ch = voice[i].channel;
 		vpb = vpblist[ch];
@@ -2437,11 +3750,20 @@ static void do_compute_data(int32 count)
 	    else
 		vpb = buffer_pointer;
 	    mix_voice(vpb, i, count);
-	    if(voice[i].timeout > 0 &&
-	       voice[i].timeout < current_sample &&
-	       voice[i].status == VOICE_SUSTAINED)
-		finish_note(i); /* timeout (See also "#extension timeout" line
-				   in *.cfg file */
+  	    if(voice[i].timeout > 0 &&
+ 	       voice[i].timeout < current_sample)
+ 	    {
+ 		if (voice[i].timeout > 1)
+ 		{
+ 		    finish_note(i); /* timeout (See also "#extension timeout" line
+  				   in *.cfg file */
+ 		}
+ 		else
+ 		{
+ 		    free_voice(i);
+ 		    ctl_note_event(i);
+ 		}
+ 	    }
 	}
     }
 
@@ -2449,210 +3771,84 @@ static void do_compute_data(int32 count)
 	uv--;
     upper_voices = uv;
 
-    if(stereo)
+    if(channel_reverb)
     {
-	if(opt_reverb_control || do_reverb_flag)
+	int k;
+
+	k = 2 * count; /* calclated buffer length in int32 */
+	for(i = 0; i < MAX_CHANNELS; i++)
 	{
-	    int k;
 	    int32 *p;
-
-	    k = 2 * count;
-	    for(i = 0; i < MAX_CHANNELS; i++)
-	    {
-		p = vpblist[i];
-		if(p != buffer_pointer)
-		{
-		    if(vc[i])
-			channel[i].rb->lastin = current_sample + 1;
-		    else if(current_sample - channel[i].rb->lastin >
-			    REVERB_MAX_DELAY_OUT)
-		    {
-			channel[i].rb->lastin = 0;
-			continue;
-		    }
-		    if(channel[i].rb->rvid == i)
-			set_ch_reverb(p, k, channel[i].rb->level);
-		}
-	    }
-
-	    if(opt_reverb_control)
-	    {
-		set_ch_reverb(buffer_pointer, k, DEFAULT_REVERB_SEND_LEVEL);
-		do_ch_reverb(buffer_pointer, k);
-	    }
-	    else if(do_reverb_flag)
-		do_reverb(buffer_pointer, k);
+	    p = vpblist[i];
+	    if(p != buffer_pointer && channel[i].reverb_id == i)
+		set_ch_reverb(p, k, channel[i].reverb_level);
 	}
+	set_ch_reverb(buffer_pointer, k, DEFAULT_REVERB_SEND_LEVEL);
+	do_ch_reverb(buffer_pointer, k);
     }
-    else if(do_reverb_flag)
-	do_mono_reverb(buffer_pointer, count);
 
     current_sample += count;
 }
 
-#ifdef PRESENCE_HACK
-extern int presence_balance;
-static void presence_resample(int32 count)
+static void do_compute_data_wav(int32 count)
 {
-    static int32 prev[AUDIO_BUFFER_SIZE * 2];
-    int32 save[AUDIO_BUFFER_SIZE * 2];
-    int32 pi, i, backoff;
-    int32 *buff;
-    int b;
+    int i, stereo, n, file_byte, samples;
 
-    if(count == 0)
-    {
-	memset(prev, 0, sizeof(prev));
-	return;
+    stereo = !(play_mode->encoding & PE_MONO);
+    samples = (stereo ? (count * 2) : count );
+    n = samples*4; /* in bytes */
+    file_byte = samples*2; /*regard as 16bit*/
+
+    memset(buffer_pointer, 0, n);
+
+    tf_read(wav_buffer, 1, file_byte, current_file_info->pcm_tf);
+    for( i=0; i<samples; i++ ){
+    	buffer_pointer[i] = (LE_SHORT(wav_buffer[i])) << 16;
+    	buffer_pointer[i] /=4; /*level down*/
     }
 
-    if(play_mode->encoding & PE_MONO)
-	return;
-    if(presence_balance == 0 || presence_balance == 1 ||
-       presence_balance == 2)
-	b = presence_balance;
-    else
-	return;
-
-    count *= 2;
-    backoff = 2 * (int)(play_mode->rate * presence_delay_msec / 1000.0);
-    if(backoff == 0)
-	return;
-    if(backoff > count)
-	backoff = count;
-    buff = common_buffer;
-
-    if(count < AUDIO_BUFFER_SIZE * 2)
-    {
-	memset(buff + count, 0, 4 * (AUDIO_BUFFER_SIZE * 2 - count));
-	count = AUDIO_BUFFER_SIZE * 2;
-    }
-
-    memcpy(save, buff, 4 * count);
-    pi = count - backoff;
-
-    if(b == 2)
-    {
-	static int turn_counter = 0, tc;
-	static int status;
-	static double rate0, rate1, dr;
-	int32 *p;
-
-#define SIDE_CONTI_SEC 10
-#define CHANGE_SEC     2.0
-
-	if(turn_counter == 0)
-	{
-	    turn_counter = SIDE_CONTI_SEC * play_mode->rate;
-
-	    /*  status: 0 -> 2 -> 3 -> 1 -> 4 -> 5 -> 0 -> ...
-	     *  status left   right
-	     *  0      -      +		(right)
-	     *  1      +      -		(left)
-	     *  2     -> +    +		(right -> center)
-	     *  3      +     -> -	(center -> left)
-	     *  4     -> -    -		(left -> center)
-	     *  5      -     -> +	(center -> right)
-	     */
-	    status = 0;
-	    tc = 0;
-	}
-	p = prev;
-	for(i = 0; i < count; i += 2, pi += 2)
-	{
-	    if(i < backoff)
-		p = prev;
-	    else if(p == prev)
-	    {
-		pi = 0;
-		p = save;
-	    }
-
-	    if(status < 2)
-		buff[i+status] = p[pi+status];
-	    else if(status < 4)
-	    {
-		int32 v, j;
-		j = (status & 1);
-
-		v = (int32)(rate0 * buff[i+j] + rate1 * p[pi+j]);
-		buff[i+j] = v;
-		rate0 += dr; rate1 -= dr;
-	    }
-	    else
-	    {
-		int32 v, j, k;
-		j = (status & 1);
-		k = !j;
-
-		v = (int32)(rate0 * buff[i+j] + rate1 * p[pi+j]);
-		buff[i+j] = v;
-		buff[i+k] = p[pi+k];
-		rate0 += dr; rate1 -= dr;
-	    }
-
-	    tc++;
-	    if(tc == turn_counter)
-	    {
-		tc = 0;
-
-		switch(status)
-		{
-		  case 0:
-		    status = 2;
-		    turn_counter = (CHANGE_SEC/2.0) * play_mode->rate;
-		    rate0 = 0.0;
-		    rate1 = 1.0;
-		    dr = 1.0 / turn_counter;
-		    break;
-
-		  case 2:
-		    status = 3;
-		    rate0 = 1.0;
-		    rate1 = 0.0;
-		    dr = -1.0 / turn_counter;
-		    break;
-
-		  case 3:
-		    status = 1;
-		    turn_counter = SIDE_CONTI_SEC * play_mode->rate;
-		    break;
-
-		  case 1:
-		    status = 4;
-		    turn_counter = (CHANGE_SEC/2.0) * play_mode->rate;
-		    rate0 = 1.0;
-		    rate1 = 0.0;
-		    dr = -1.0 / turn_counter;
-		    break;
-
-		  case 4:
-		    status = 5;
-		    turn_counter = (CHANGE_SEC/2.0) * play_mode->rate;
-		    rate0 = 0.0;
-		    rate1 = 1.0;
-		    dr = 1.0 / turn_counter;
-		    break;
-
-		  case 5:
-		    status = 0;
-		    turn_counter = SIDE_CONTI_SEC * play_mode->rate;
-		    break;
-		}
-	    }
-	}
-    }
-    else
-    {
-	for(i = 0; i < backoff; i += 2, pi += 2)
-	    buff[b+i] = prev[b+pi];
-	for(pi = 0; i < count; i += 2, pi += 2)
-	    buff[b+i] = save[b+pi];
-    }
-
-    memcpy(prev + count - backoff, save + count - backoff, 4 * backoff);
+    current_sample += count;
 }
-#endif /* PRESENCE_HACK */
+
+static void do_compute_data_aiff(int32 count)
+{
+    int i, stereo, n, file_byte, samples;
+
+    stereo = !(play_mode->encoding & PE_MONO);
+    samples = (stereo ? (count * 2) : count );
+    n = samples*4; /* in bytes */
+    file_byte = samples*2; /*regard as 16bit*/
+
+    memset(buffer_pointer, 0, n);
+
+    tf_read(wav_buffer, 1, file_byte, current_file_info->pcm_tf);
+    for( i=0; i<samples; i++ ){
+    	buffer_pointer[i] = (BE_SHORT(wav_buffer[i])) << 16;
+    	buffer_pointer[i] /=4; /*level down*/
+    }
+
+    current_sample += count;
+}
+
+static void do_compute_data(int32 count)
+{
+    switch(current_file_info->pcm_mode)
+    {
+      case PCM_MODE_NON:
+    	do_compute_data_midi(count);
+      	break;
+      case PCM_MODE_WAV:
+    	do_compute_data_wav(count);
+        break;
+      case PCM_MODE_AIFF:
+    	do_compute_data_aiff(count);
+        break;
+      case PCM_MODE_AU:
+        break;
+      case PCM_MODE_MP3:
+        break;
+    }    
+}
 
 static int check_midi_play_end(MidiEvent *e, int len)
 {
@@ -2661,7 +3857,7 @@ static int check_midi_play_end(MidiEvent *e, int len)
     for(i = 0; i < len; i++)
     {
 	type = e[i].type;
-	if(type == ME_NOTEON || type == ME_LAST || type == ME_WRD)
+	if(type == ME_NOTEON || type == ME_LAST || type == ME_WRD || type == ME_SHERRY)
 	    return 0;
 	if(type == ME_EOT)
 	    return i + 1;
@@ -2675,8 +3871,17 @@ static int midi_play_end(void)
     int i, rc = RC_TUNE_END;
 
     check_eot_flag = 0;
+
+    if(opt_realtime_playing == 2 && current_sample == 0)
+    {
+	reset_voices();
+	return RC_TUNE_END;
+    }
+
     if(upper_voices > 0)
     {
+	int fadeout_cnt;
+
 	rc = compute_data(play_mode->rate);
 	if(RC_IS_SKIP_FILE(rc))
 	    goto midi_end;
@@ -2684,12 +3889,13 @@ static int midi_play_end(void)
 	for(i = 0; i < upper_voices; i++)
 	    if(voice[i].status & (VOICE_ON | VOICE_SUSTAINED))
 		finish_note(i);
-	for(i = 0; i < MIDITRACE_OUTPUT_FRAGMENTS && upper_voices > 0; i++)
+	if(opt_realtime_playing == 2)
+	    fadeout_cnt = 3;
+	else
+	    fadeout_cnt = 6;
+	for(i = 0; i < fadeout_cnt && upper_voices > 0; i++)
 	{
-	    trace_loop();
-	    rc = compute_data(play_mode->rate * 3
-			      / MIDITRACE_OUTPUT_FRAGMENTS);
-	    play_mode->play_loop();
+	    rc = compute_data(play_mode->rate / 2);
 	    if(RC_IS_SKIP_FILE(rc))
 		goto midi_end;
 	}
@@ -2705,10 +3911,17 @@ static int midi_play_end(void)
     /* clear reverb echo sound */
     init_reverb(play_mode->rate);
     for(i = 0; i < MAX_CHANNELS; i++)
-	channel[i].rb = NULL;
+    {
+	channel[i].reverb_level = -1;
+	channel[i].reverb_id = -1;
+	make_rvid_flag = 1;
+    }
 
     /* output null sound */
-    rc = compute_data((int32)(play_mode->rate * PLAY_INTERLEAVE_SEC));
+    if(opt_realtime_playing == 2)
+	rc = compute_data((int32)(play_mode->rate * PLAY_INTERLEAVE_SEC/2));
+    else
+	rc = compute_data((int32)(play_mode->rate * PLAY_INTERLEAVE_SEC));
     if(RC_IS_SKIP_FILE(rc))
 	goto midi_end;
 
@@ -2716,30 +3929,21 @@ static int midi_play_end(void)
 
     if(ctl->trace_playing)
     {
-	rc = play_mode->flush_output(); /* Wait until play out */
-	data_output_count = 0;
+	rc = aq_flush(0); /* Wait until play out */
 	if(RC_IS_SKIP_FILE(rc))
 	    goto midi_end;
     }
     else
     {
 	trace_flush();
-	while(play_mode->play_loop())
-	{
-	    int rc;
-	    usleep(100000);
-	    rc = check_apply_control();
-	    if(RC_IS_SKIP_FILE(rc))
-		goto midi_end;
-	}
+	rc = aq_soft_flush();
+	if(RC_IS_SKIP_FILE(rc))
+	    goto midi_end;
     }
 
   midi_end:
     if(RC_IS_SKIP_FILE(rc))
-    {
-	play_mode->purge_output();
-	data_output_count = 0;
-    }
+	aq_flush(1);
 
     ctl->cmsg(CMSG_INFO, VERB_VERBOSE, "Playing time: ~%d seconds",
 	      current_sample/play_mode->rate+2);
@@ -2769,93 +3973,246 @@ static int compute_data(int32 count)
 	  soundspec_update_wave(common_buffer, buffered_count);
 #endif /* SUPPORT_SOUNDSPEC */
 
-#ifdef PRESENCE_HACK
-	  presence_resample(buffered_count);
-#endif /* PRESENCE_HACK */
-
-	  play_mode->output_data(common_buffer, buffered_count);
+	  if(aq_add(common_buffer, buffered_count) == -1)
+	      return RC_ERROR;
       }
       buffer_pointer=common_buffer;
       buffered_count=0;
       return RC_NONE;
     }
 
-  while ((count+buffered_count) >= AUDIO_BUFFER_SIZE)
+  while ((count+buffered_count) >= audio_buffer_size)
     {
       int i;
 
-      do_compute_data(AUDIO_BUFFER_SIZE-buffered_count);
-      count -= AUDIO_BUFFER_SIZE-buffered_count;
+      if((rc = apply_controls()) != RC_NONE)
+	  return rc;
+
+      do_compute_data(audio_buffer_size-buffered_count);
+      count -= audio_buffer_size-buffered_count;
       ctl->cmsg(CMSG_INFO, VERB_DEBUG_SILLY,
-		"output data (%d)", AUDIO_BUFFER_SIZE);
+		"output data (%d)", audio_buffer_size);
 
 #ifdef SUPPORT_SOUNDSPEC
-      soundspec_update_wave(common_buffer, AUDIO_BUFFER_SIZE);
+      soundspec_update_wave(common_buffer, audio_buffer_size);
 #endif /* SUPPORT_SOUNDSPEC */
 
-#ifdef PRESENCE_HACK
-      presence_resample(AUDIO_BUFFER_SIZE);
-#endif /* PRESENCE_HACK */
+#if defined(CSPLINE_INTERPOLATION) || defined(LAGRANGE_INTERPOLATION)
+      /* fall back to linear interpolation when queue < 100% */
+      if (opt_realtime_playing != 2 && (play_mode->flag & PF_CAN_TRACE)) {
+	  if (!aq_fill_buffer_flag &&
+	      100 * ((double)(aq_filled() + aq_soft_filled()) /
+		     aq_get_dev_queuesize()) < 99)
+	      reduce_quality_flag = 1;
+	  else
+	      reduce_quality_flag = no_4point_interpolation;
+      }
+#endif
 
-    if(trace_loop() && data_output_count > fragment_start_count)
-    {
-	  int i;
-	  int32 *bufp;
-	  static int j = 0, nfragm, d, ch;
+#ifdef REDUCE_VOICE_TIME_TUNING
+      /* Auto voice reduce implementation by Masanao Izumo */
+      if(reduce_voice_threshold &&
+	 (play_mode->flag & PF_CAN_TRACE) &&
+	 !aq_fill_buffer_flag &&
+	 aq_get_dev_queuesize() > 0)
+      {
+	  /* Reduce voices if there is not enough audio device buffer */
 
-	  if(j == 0)
+          int nv, filled, filled_limit, rate, rate_limit;
+          static int last_filled;
+
+	  filled = aq_filled();
+
+	  rate_limit = 75;
+	  if(reduce_voice_threshold >= 0)
 	  {
-	      int r;
-
-	      r = play_mode->rate / MIDITRACE_OUTPUT_FRAGMENTS;
-	      for(j = 256; j < r && j < AUDIO_BUFFER_SIZE; j <<= 1)
-		  ;
-	      nfragm = AUDIO_BUFFER_SIZE / j;
-	      if(play_mode->encoding & PE_MONO)
-		  ch = 1;
-	      else
-		  ch = 2;
-	      d = ch * AUDIO_BUFFER_SIZE / nfragm;
+	      filled_limit = play_mode->rate * reduce_voice_threshold / 1000
+		  + 1; /* +1 disable zero */
 	  }
-
-	  bufp = common_buffer;
-	  for(i = 0; i < nfragm; i++, bufp += d)
+	  else /* Use default threshold */
 	  {
-	      play_mode->output_data(bufp, d / ch);
-	      if(trace_loop() == 0)
+	      int32 maxfill;
+	      maxfill = aq_get_dev_queuesize();
+	      filled_limit = REDUCE_VOICE_TIME_TUNING;
+	      if(filled_limit > maxfill / 5) /* too small audio buffer */
 	      {
-		  bufp += d;
-		  i++;
-		  break;
+		  rate_limit -= 100 * audio_buffer_size / maxfill / 5;
+		  filled_limit = 1;
 	      }
 	  }
-	  for(; i < nfragm; i++, bufp += d)
-	      play_mode->output_data(bufp, d / ch);
+
+	  rate = 100 * filled / aq_get_dev_queuesize();
+          for(i = nv = 0; i < upper_voices; i++)
+	      if(voice[i].status != VOICE_FREE)
+	          nv++;
+
+	  if(opt_realtime_playing != 2)
+	  {
+	      /* calculate ok_nv, the "optimum" max polyphony */
+	      if (auto_reduce_polyphony && rate < 85) {
+		/* average in current nv */
+	        if ((rate == old_rate && nv > min_bad_nv) ||
+	            (rate >= old_rate && rate < 20)) {
+	        	ok_nv_total += nv;
+	        	ok_nv_counts++;
+	        }
+	        /* increase polyphony when it is too low */
+	        else if (nv == voices &&
+	                 (rate > old_rate && filled > last_filled)) {
+	          		ok_nv_total += nv + 1;
+	          		ok_nv_counts++;
+	        }
+	        /* reduce polyphony when loosing buffer */
+	        else if (rate < 75 &&
+	        	 (rate < old_rate && filled < last_filled)) {
+	        	ok_nv_total += min_bad_nv;
+	    		ok_nv_counts++;
+	        }
+	        else goto NO_RESCALE_NV;
+
+		/* rescale ok_nv stuff every 1 seconds */
+		if (current_sample >= ok_nv_sample && ok_nv_counts > 1) {
+			ok_nv_total >>= 1;
+			ok_nv_counts >>= 1;
+			ok_nv_sample = current_sample + (play_mode->rate);
+		}
+
+		NO_RESCALE_NV:;
+	      }
+	  }
+
+	  /* EAW -- if buffer is < 75%, start reducing some voices to
+	     try to let it recover.  This really helps a lot, preserves
+	     decent sound, and decreases the frequency of lost ON notes */
+	  if ((opt_realtime_playing != 2 && rate < rate_limit)
+	      || filled < filled_limit)
+	  {
+	      if(filled <= last_filled)
+	      {
+	          int v, kill_nv, temp_nv;
+
+		  /* set bounds on "good" and "bad" nv */
+		  if (opt_realtime_playing != 2 && rate > 20 &&
+		      nv < min_bad_nv) {
+		  	min_bad_nv = nv;
+	                if (max_good_nv < min_bad_nv)
+	                	max_good_nv = min_bad_nv;
+	          }
+
+		  /* EAW -- count number of !ON voices */
+		  /* treat chorus notes as !ON */
+		  for(i = kill_nv = 0; i < upper_voices; i++) {
+		      if(voice[i].status & VOICE_FREE ||
+		         voice[i].cache != NULL)
+		      		continue;
+		      
+		      if((voice[i].status & ~(VOICE_ON|VOICE_SUSTAINED) &&
+			  !(voice[i].status & ~(VOICE_DIE) &&
+			    voice[i].sample->note_to_use)))
+				kill_nv++;
+		  }
+
+		  /* EAW -- buffer is dangerously low, drasticly reduce
+		     voices to a hopefully "safe" amount */
+		  if (filled < filled_limit &&
+		      (opt_realtime_playing == 2 || rate < 10)) {
+		      FLOAT_T n;
+
+		      /* calculate the drastic voice reduction */
+		      if(nv > kill_nv) /* Avoid division by zero */
+		      {
+			  n = (FLOAT_T) nv / (nv - kill_nv);
+			  temp_nv = (int)(nv - nv / (n + 1));
+
+			  /* reduce by the larger of the estimates */
+			  if (kill_nv < temp_nv && temp_nv < nv)
+			      kill_nv = temp_nv;
+		      }
+		      else kill_nv = nv - 1; /* do not kill all the voices */
+		  }
+		  else {
+		      /* the buffer is still high enough that we can throw
+		         fewer voices away; keep the ON voices, use the
+		         minimum "bad" nv as a floor on voice reductions */
+		      temp_nv = nv - min_bad_nv;
+		      if (kill_nv > temp_nv)
+		          kill_nv = temp_nv;
+		  }
+
+		  for(i = 0; i < kill_nv; i++)
+		      v = reduce_voice();
+
+		  /* lower max # of allowed voices to let the buffer recover */
+		  if (auto_reduce_polyphony) {
+		  	temp_nv = nv - kill_nv;
+		  	ok_nv = ok_nv_total / ok_nv_counts;
+
+		  	/* decrease it to current nv left */
+		  	if (voices > temp_nv && temp_nv > ok_nv)
+			    voice_decrement_conservative(voices - temp_nv);
+			/* decrease it to ok_nv */
+		  	else if (voices > ok_nv && temp_nv <= ok_nv)
+			    voice_decrement_conservative(voices - ok_nv);
+		  	/* increase the polyphony */
+		  	else if (voices < ok_nv)
+			    voice_increment(ok_nv - voices);
+		  }
+
+		  while(upper_voices > 0 &&
+			voice[upper_voices - 1].status == VOICE_FREE)
+		      upper_voices--;
+	      }
+	      last_filled = filled;
+	  }
+	  else {
+	      if (opt_realtime_playing != 2 && rate >= rate_limit &&
+	          filled > last_filled) {
+
+		    /* set bounds on "good" and "bad" nv */
+		    if (rate > 85 && nv > max_good_nv) {
+		  	max_good_nv = nv;
+		  	if (min_bad_nv > max_good_nv)
+		  	    min_bad_nv = max_good_nv;
+		    }
+
+		    if (auto_reduce_polyphony) {
+		    	/* reset ok_nv stuff when out of danger */
+		    	ok_nv_total = max_good_nv * ok_nv_counts;
+			if (ok_nv_counts > 1) {
+			    ok_nv_total >>= 1;
+			    ok_nv_counts >>= 1;
+			}
+
+		    	/* restore max # of allowed voices to normal */
+			restore_voices(0);
+		    }
+	      }
+
+	      last_filled = filled_limit;
+          }
+          old_rate = rate;
       }
-      else
-	  play_mode->output_data(common_buffer, AUDIO_BUFFER_SIZE);
-      data_output_count += AUDIO_BUFFER_SIZE;
+#endif
+
+      if(aq_add(common_buffer, audio_buffer_size) == -1)
+	  return RC_ERROR;
 
       buffer_pointer=common_buffer;
       buffered_count=0;
       if(current_event->type != ME_EOT)
 	  ctl_timestamp();
-      if((rc = apply_controls()) != RC_NONE)
-	  return rc;
 
-#ifdef __WIN32__
       /* check break signals */
       VOLATILE_TOUCH(intr);
       if(intr)
 	  return RC_QUIT;
-#endif
 
       if(upper_voices == 0 && check_eot_flag &&
 	 (i = check_midi_play_end(current_event, EOT_PRESEARCH_LEN)) > 0)
       {
 	  if(i > 1)
 	      ctl->cmsg(CMSG_INFO, VERB_VERBOSE,
-			"%d MIDI events are ignored", i - 1);
+			"Last %d MIDI events are ignored", i - 1);
 	  return midi_play_end();
       }
     }
@@ -2864,8 +4221,6 @@ static int compute_data(int32 count)
       do_compute_data(count);
       buffered_count += count;
       buffer_pointer += (play_mode->encoding & PE_MONO) ? count : count*2;
-      play_mode->play_loop();
-      trace_loop();
     }
   return RC_NONE;
 }
@@ -2901,15 +4256,18 @@ static void drop_portamento(int ch)
 
 static void update_portamento_controls(int ch)
 {
-    if(!channel[ch].portamento || channel[ch].portamento_time < 128)
+    if(!channel[ch].portamento ||
+       (channel[ch].portamento_time_msb | channel[ch].portamento_time_lsb)
+       == 0)
 	drop_portamento(ch);
     else
     {
 	double mt, dc;
 	int d;
 
-	mt = midi_time_table[(channel[ch].portamento_time >> 7) & 0x7F]
-	    * PORTAMENTO_TIME_TUNING;
+	mt = midi_time_table[channel[ch].portamento_time_msb & 0x7F] *
+	    midi_time_table2[channel[ch].portamento_time_lsb & 0x7F] *
+		PORTAMENTO_TIME_TUNING;
 	dc = play_mode->rate * mt;
 	d = (int)(1.0 / (mt * PORTAMENTO_CONTROL_RATIO));
 	d++;
@@ -2941,14 +4299,19 @@ static void update_portamento_time(int ch)
     }
 }
 
-int default_play_event(void *p)
+int play_event(MidiEvent *ev)
 {
-    MidiEvent *ev = (MidiEvent *)p;
     int ch;
     int32 i, cet;
 
+    if(play_mode->flag & PF_MIDI_EVENT)
+	return play_mode->acntl(PM_REQ_MIDI, ev);
+    if(!(play_mode->flag & PF_PCM_STREAM))
+	return RC_NONE;
+
     current_event = ev;
     cet = MIDI_EVENT_TIME(ev);
+
     if(ctl->verbosity >= VERB_DEBUG_SILLY)
 	ctl->cmsg(CMSG_INFO, VERB_DEBUG_SILLY,
 		  "Midi Event %d: %s %d %d %d", cet,
@@ -3011,6 +4374,11 @@ int default_play_event(void *p)
 	break;
 
       case ME_MODULATION_WHEEL:
+	if(play_system_mode == XG_SYSTEM_MODE) {
+		ev->a *= 1.2;
+	} else if(channel[ch].mapID == SC_55_TONE_MAP) {
+		ev->a *= 0.7;
+	}
 	channel[ch].modulation_wheel =
 	    midi_cnv_vib_depth(ev->a);
 	update_modulation_wheel(ch, channel[ch].modulation_wheel);
@@ -3025,7 +4393,8 @@ int default_play_event(void *p)
 
       case ME_PAN:
 	channel[ch].panning = ev->a;
-	if(adjust_panning_immediately)
+	channel[ch].pan_random = 0;
+	if(adjust_panning_immediately && !channel[ch].pan_random)
 	    adjust_panning(ch);
 	ctl_mode_event(CTLE_PANNING, 1, ch, ev->a);
 	break;
@@ -3037,20 +4406,25 @@ int default_play_event(void *p)
 	break;
 
       case ME_SUSTAIN:
-	channel[ch].sustain = ev->a;
+	channel[ch].sustain = (ev->a >= 64);
 	if(!ev->a)
 	    drop_sustain(ch);
-	ctl_mode_event(CTLE_SUSTAIN, 1, ch, ev->a);
+	ctl_mode_event(CTLE_SUSTAIN, 1, ch, ev->a >= 64);
 	break;
 
-      case ME_PORTAMENTO_TIME:
-	channel[ch].portamento_time = ev->a + ev->b * 128;
+      case ME_PORTAMENTO_TIME_MSB:
+	channel[ch].portamento_time_msb = ev->a;
+	update_portamento_time(ch);
+	break;
+
+      case ME_PORTAMENTO_TIME_LSB:
+	channel[ch].portamento_time_lsb = ev->a;
 	update_portamento_time(ch);
 	break;
 
       case ME_PORTAMENTO:
-	channel[ch].portamento = ev->a;
-	if(!ev->a)
+	channel[ch].portamento = (ev->a >= 64);
+	if(!channel[ch].portamento)
 	    drop_portamento(ch);
 	break;
 
@@ -3072,9 +4446,11 @@ int default_play_event(void *p)
 	break;
 
       case ME_REVERB_EFFECT:
-	set_reverb_level(ch, ev->a);
-	ctl_mode_event(CTLE_REVERB_EFFECT, 1, ch,
-		       channel[ch].rb ? channel[ch].rb->level : 0);
+	if(opt_reverb_control)
+	{
+	    set_reverb_level(ch, ev->a);
+	    ctl_mode_event(CTLE_REVERB_EFFECT, 1, ch, get_reverb_level(ch));
+	}
 	break;
 
       case ME_CHORUS_EFFECT:
@@ -3083,9 +4459,34 @@ int default_play_event(void *p)
 	    if(opt_chorus_control == 1)
 		channel[ch].chorus_level = ev->a;
 	    else
-		channel[ch].chorus_level = opt_chorus_control;
-	    ctl_mode_event(CTLE_CHORUS_EFFECT, 1, ch, channel[ch].chorus_level);
+		channel[ch].chorus_level = -opt_chorus_control;
+	    ctl_mode_event(CTLE_CHORUS_EFFECT, 1, ch, get_chorus_level(ch));
 	}
+	break;
+
+      case ME_TREMOLO_EFFECT:
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Tremolo Send (CH:%d LEVEL:%d)",ch,ev->a);
+	break;
+
+      case ME_CELESTE_EFFECT:
+	if(opt_chorus_control) {
+		channel[ch].delay_level = ev->a;
+		ctl->cmsg(CMSG_INFO,VERB_NOISY,"Delay Send (CH:%d LEVEL:%d)",ch,ev->a);
+	}
+	break;
+
+	  case ME_ATTACK_TIME:
+  	if(!opt_tva_attack) { break; }
+	set_envelope_time(ch,ev->a,0);
+	break;
+
+	  case ME_RELEASE_TIME:
+  	if(!opt_tva_release) { break; }
+	set_envelope_time(ch,ev->a,3);
+	break;
+
+      case ME_PHASER_EFFECT:
+	ctl->cmsg(CMSG_INFO,VERB_NOISY,"Phaser Send (CH:%d LEVEL:%d)",ch,ev->a);
 	break;
 
       case ME_RPN_INC:
@@ -3156,9 +4557,9 @@ int default_play_event(void *p)
 	/* TiMidity Extensionals */
       case ME_RANDOM_PAN:
 	channel[ch].panning = int_rand(128);
-	if(adjust_panning_immediately)
+	channel[ch].pan_random = 1;
+	if(adjust_panning_immediately && !channel[ch].pan_random)
 	    adjust_panning(ch);
-	ctl_mode_event(CTLE_PANNING, 1, ch, channel[ch].panning);
 	break;
 
       case ME_SET_PATCH:
@@ -3170,7 +4571,7 @@ int default_play_event(void *p)
 
       case ME_TEMPO:
 	current_play_tempo = ch + ev->b * 256 + ev->a * 65536;
-	play_tempo_offset = ev->time;
+	ctl_mode_event(CTLE_TEMPO, 1, current_play_tempo, 0);
 	break;
 
       case ME_CHORUS_TEXT:
@@ -3181,6 +4582,11 @@ int default_play_event(void *p)
       case ME_KARAOKE_LYRIC:
 	i = ev->a | ((int)ev->b << 8);
 	ctl_mode_event(CTLE_LYRIC, 1, i, 0);
+	break;
+
+      case ME_GSLCD:
+	i = ev->a | ((int)ev->b << 8);
+	ctl_mode_event(CTLE_GSLCD, 1, i, 0);
 	break;
 
       case ME_MASTER_VOLUME:
@@ -3194,8 +4600,9 @@ int default_play_event(void *p)
 	break;
 
       case ME_PATCH_OFFS:
-	if(special_patch[ch] != NULL)
-	    special_patch[ch]->sample_offset =
+	i = channel[ch].special_sample;
+	if(special_patch[i] != NULL)
+	    special_patch[i]->sample_offset =
 		(current_event->a | 256 * current_event->b);
 	break;
 
@@ -3204,13 +4611,19 @@ int default_play_event(void *p)
 			 ch, current_event->a | (current_event->b << 8));
 	break;
 
+      case ME_SHERRY:
+	push_midi_trace1(wrd_sherry_event,
+			 ch | (current_event->a<<8) | (current_event->b<<16));
+	break;
+
       case ME_DRUMPART:
 	if(midi_drumpart_change(ch, current_event->a))
 	{
 	    /* Update bank information */
 	    midi_program_change(ch, channel[ch].program);
+	    ctl_mode_event(CTLE_DRUMPART, 1, ch, ISDRUMCHANNEL(ch));
+	    ctl_prog_event(ch);
 	}
-	ctl_prog_event(ch);
 	break;
 
       case ME_KEYSHIFT:
@@ -3225,7 +4638,7 @@ int default_play_event(void *p)
       case ME_NOTE_STEP:
 	i = ev->a | ((int)ev->b << 8);
 	ctl_mode_event(CTLE_METRONOME, 1, i, 0);
-	if(readmidi_wrd_flag)
+	if(readmidi_wrd_mode)
 	    wrdt->update_events();
 	break;
 
@@ -3236,31 +4649,61 @@ int default_play_event(void *p)
     return RC_NONE;
 }
 
-/* parameter "events" was declared but never referenced */
 static int play_midi(MidiEvent *eventlist, int32 samples)
 {
     int rc;
     static int play_count = 0;
 
-    rc = play_mode->flush_output();
-    data_output_count = 0;
-    if(RC_IS_SKIP_FILE(rc))
+    if (play_mode->id_character == 'm') {
+	int cnt;
+
+	convert_mod_to_midi_file(eventlist);
+
+	play_count = 0;
+	cnt = free_global_mblock();	/* free unused memory */
+	if(cnt > 0)
+	    ctl->cmsg(CMSG_INFO, VERB_VERBOSE,
+		      "%d memory blocks are free", cnt);
 	return rc;
+    }
 
     sample_count = samples;
     event_list = eventlist;
     lost_notes = cut_notes = 0;
+    check_eot_flag = 1;
+
+    wrd_midi_event(-1, -1); /* For initialize */
+
+    reset_midi(0);
+    if(!opt_realtime_playing &&
+       allocate_cache_size > 0 &&
+       !IS_CURRENT_MOD_FILE &&
+       (play_mode->flag&PF_PCM_STREAM))
+    {
+	play_midi_prescan(eventlist);
+	reset_midi(0);
+    }
+
+    rc = aq_flush(0);
+    if(RC_IS_SKIP_FILE(rc))
+	return rc;
+
     skip_to(midi_restart_time);
 
-    check_eot_flag = 1;
+    if(midi_restart_time > 0) { /* Need to update interface display */
+      int i;
+      for(i = 0; i < MAX_CHANNELS; i++)
+	redraw_controllers(i);
+    }
+    rc = RC_NONE;
     for(;;)
     {
-	rc = play_mode->play_event(current_event);
-	if(current_event->type == ME_EOT)
-	    break;
+	midi_restart_time = 1;
+	rc = play_event(current_event);
 	if(rc != RC_NONE)
 	    break;
-	current_event++;
+	if (midi_restart_time)    /* don't skip the first event if == 0 */
+	    current_event++;
     }
 
     if(play_count++ > 3)
@@ -3275,152 +4718,315 @@ static int play_midi(MidiEvent *eventlist, int32 samples)
     return rc;
 }
 
-int play_midi_file(char *fn)
+static void read_header_wav(struct timidity_file* tf)
 {
-    MidiEvent *event;
-    int32 events, samples;
-    int rc = RC_NONE, i;
-    static int last_rc = RC_NONE;
+    char buff[44];
+    tf_read( buff, 1, 44, tf);
+}
+
+static int read_header_aiff(struct timidity_file* tf)
+{
+    char buff[5]="    ";
+    int i;
+    
+    for( i=0; i<100; i++ ){
+    	buff[0]=buff[1]; buff[1]=buff[2]; buff[2]=buff[3];
+    	tf_read( &buff[3], 1, 1, tf);
+    	if( strcmp(buff,"SSND")==0 ){
+            /*SSND chunk found */
+    	    tf_read( &buff[0], 1, 4, tf);
+    	    tf_read( &buff[0], 1, 4, tf);
+	    ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "aiff header read OK.");
+	    return 0;
+    	}
+    }
+    /*SSND chunk not found */
+    return -1;
+}
+
+static int load_pcm_file_wav()
+{
+    char *filename;
+
+    if(strcmp(pcm_alternate_file, "auto") == 0)
+    {
+	filename = safe_malloc(strlen(current_file_info->filename)+5);
+	strcpy(filename, current_file_info->filename);
+	strcat(filename, ".wav");
+    }
+    else if(strlen(pcm_alternate_file) >= 5 &&
+	    strncasecmp(pcm_alternate_file + strlen(pcm_alternate_file) - 4,
+			".wav", 4) == 0)
+	filename = safe_strdup(pcm_alternate_file);
+    else
+	return -1;
+
+    ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "wav filename: %s", filename);
+    current_file_info->pcm_tf = open_file(filename, 0, OF_SILENT);
+    if( current_file_info->pcm_tf ){
+	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "open successed.");
+	read_header_wav(current_file_info->pcm_tf);
+	current_file_info->pcm_filename = filename;
+	current_file_info->pcm_mode = PCM_MODE_WAV;
+	return 0;
+    }else{
+	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "open failed.");
+	free(filename);
+	current_file_info->pcm_filename = NULL;
+	return -1;
+    }
+}
+
+static int load_pcm_file_aiff()
+{
+    char *filename;
+
+    if(strcmp(pcm_alternate_file, "auto") == 0)
+    {
+	filename = safe_malloc(strlen(current_file_info->filename)+6);
+	strcpy(filename, current_file_info->filename);
+	strcat( filename, ".aiff");
+    }
+    else if(strlen(pcm_alternate_file) >= 6 &&
+	    strncasecmp(pcm_alternate_file + strlen(pcm_alternate_file) - 5,
+			".aiff", 5) == 0)
+	filename = safe_strdup(pcm_alternate_file);
+    else
+	return -1;
+
+    ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "aiff filename: %s", filename);
+    current_file_info->pcm_tf = open_file(filename, 0, OF_SILENT);
+    if( current_file_info->pcm_tf ){
+	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "open successed.");
+	read_header_aiff(current_file_info->pcm_tf);
+	current_file_info->pcm_filename = filename;
+	current_file_info->pcm_mode = PCM_MODE_AIFF;
+	return 0;
+    }else{
+	ctl->cmsg(CMSG_INFO, VERB_NOISY,
+		      "open failed.");
+	free(filename);
+	current_file_info->pcm_filename = NULL;
+	return -1;
+    }
+}
+
+static void load_pcm_file()
+{
+    if( load_pcm_file_wav()==0 ) return; /*load OK*/
+    if( load_pcm_file_aiff()==0 ) return; /*load OK*/
+}
+
+static int play_midi_load_file(char *fn,
+			       MidiEvent **event,
+			       int32 *nsamples)
+{
+    int rc;
     struct timidity_file *tf;
-    static int init_flag = 0;
+    int32 nevents;
+
+    *event = NULL;
 
     if(!strcmp(fn, "-"))
 	file_from_stdin = 1;
     else
 	file_from_stdin = 0;
 
-    rc = check_apply_control();
-    if(RC_IS_SKIP_FILE(rc))
-	return rc;
-
-    if(!init_flag)
-    {
-	init_flag = 1;
-	for(i = 0; i < MAX_CHANNELS; i++)
-	    memset(channel[i].drums, 0, sizeof(channel[i].drums));
-
-	/* Memory initialize at first call.
-	 * It needs for optimization of memory alignment.
-	 */
-	if(allocate_cache_size > 0)
-	    resamp_cache_reset();
-    }
-
-    init_mblock(&playmidi_pool);
-    reset_midi(0);
-
-  play_restart:
     ctl_mode_event(CTLE_NOW_LOADING, 0, (long)fn, 0);
     ctl->cmsg(CMSG_INFO, VERB_VERBOSE, "MIDI file: %s", fn);
     if((tf = open_midi_file(fn, 1, OF_VERBOSE)) == NULL)
     {
-	if(last_rc == RC_REALLY_PREVIOUS)
-	    return RC_REALLY_PREVIOUS;
+	ctl_mode_event(CTLE_LOADING_DONE, 0, -1, 0);
 	return RC_ERROR;
     }
 
-    event = NULL;
+    *event = NULL;
     rc = check_apply_control();
     if(RC_IS_SKIP_FILE(rc))
-	goto play_end; /* skip playing */
+    {
+	close_file(tf);
+	ctl_mode_event(CTLE_LOADING_DONE, 0, 1, 0);
+	return rc;
+    }
 
-    event = read_midi_file(tf, &events, &samples, fn);
+    *event = read_midi_file(tf, &nevents, nsamples, fn);
     close_file(tf);
 
-    if(!event)
+    if(*event == NULL)
     {
-	if(last_rc == RC_REALLY_PREVIOUS)
-	    return RC_REALLY_PREVIOUS;
+	ctl_mode_event(CTLE_LOADING_DONE, 0, -1, 0);
 	return RC_ERROR;
     }
 
     ctl->cmsg(CMSG_INFO, VERB_NOISY,
-	      "%d supported events, %d samples, time %d:%02d", events, samples,
-	      samples / play_mode->rate / 60,
-	      (samples / play_mode->rate) % 60);
+	      "%d supported events, %d samples, time %d:%02d",
+	      nevents, *nsamples,
+	      *nsamples / play_mode->rate / 60,
+	      (*nsamples / play_mode->rate) % 60);
 
-    ctl_mode_event(CTLE_PLAY_START, 0, samples, 0);
-    ctl_mode_event(CTLE_MASTER_VOLUME, 0, amplification, 0);
+    current_file_info->pcm_mode = PCM_MODE_NON; /*initialize*/
+    if(pcm_alternate_file != NULL &&
+       strcmp(pcm_alternate_file, "none") != 0 &&
+       (play_mode->flag&PF_PCM_STREAM))
+	load_pcm_file();
 
-     if(!opt_realtime_playing && !IS_CURRENT_MOD_FILE
-        && (play_mode->flag&PF_NEED_INSTRUMENTS))
-	load_missing_instruments(&rc);
+    if(!IS_CURRENT_MOD_FILE &&
+       (play_mode->flag&PF_PCM_STREAM))
+    {
+	/* FIXME: Instruments is not need for pcm_alternate_file. */
+
+	/* Load instruments
+	 * If opt_realtime_playing, the instruments will be loaded later.
+	 */
+	if(!opt_realtime_playing)
+	{
+	    rc = RC_NONE;
+	    load_missing_instruments(&rc);
+	    if(RC_IS_SKIP_FILE(rc))
+	    {
+		/* Instrument loading is terminated */
+		ctl_mode_event(CTLE_LOADING_DONE, 0, 1, 0);
+		clear_magic_instruments();
+		return rc;
+	    }
+	}
+    }
+    else
+	clear_magic_instruments();	/* Clear load markers */
+
     ctl_mode_event(CTLE_LOADING_DONE, 0, 0, 0);
 
-    if(RC_IS_SKIP_FILE(rc))
-    {
-	/* Interupted instrument loading */
-	clear_magic_load_instruments();
-	goto play_end; /* skip playing */
-    }
+    return RC_NONE;
+}
 
+int play_midi_file(char *fn)
+{
+    int i, rc;
+    static int last_rc = RC_NONE;
+    MidiEvent *event;
+    int32 nsamples;
+
+    /* Set current file information */
+    current_file_info = get_midi_file_info(fn, 1);
+
+    rc = check_apply_control();
+    if(RC_IS_SKIP_FILE(rc) && rc != RC_RELOAD)
+	return rc;
+
+    /* Reset key & speed each files */
     note_key_offset = 0;
     midi_time_ratio = 1.0;
 
-    if(!opt_realtime_playing && allocate_cache_size > 0
-       && !IS_CURRENT_MOD_FILE && (play_mode->flag&PF_NEED_INSTRUMENTS))
-	play_midi_prescan(event);
+    /* Reset restart offset */
+    midi_restart_time = 0;
 
-    wrd_midi_event(-1, -1); /* For initialize */
-    rc = play_midi(event, samples);
+#ifdef REDUCE_VOICE_TIME_TUNING
+    /* Reset voice reduction stuff */
+    min_bad_nv = 256;
+    max_good_nv = 1;
+    ok_nv_total = 32;
+    ok_nv_counts = 1;
+    ok_nv = 32;
+    ok_nv_sample = 0;
+    old_rate = -1;
+#if defined(CSPLINE_INTERPOLATION) || defined(LAGRANGE_INTERPOLATION)
+    reduce_quality_flag = no_4point_interpolation;
+#endif
+    restore_voices(0);
+#endif
 
+  play_reload: /* Come here to reload MIDI file */
+    rc = play_midi_load_file(fn, &event, &nsamples);
+    if(RC_IS_SKIP_FILE(rc))
+	goto play_end; /* skip playing */
+
+    init_mblock(&playmidi_pool);
+    ctl_mode_event(CTLE_PLAY_START, 0, nsamples, 0);
+    play_mode->acntl(PM_REQ_PLAY_START, NULL);
+    rc = play_midi(event, nsamples);
+    play_mode->acntl(PM_REQ_PLAY_END, NULL);
+    ctl_mode_event(CTLE_PLAY_END, 0, 0, 0);
     reuse_mblock(&playmidi_pool);
+
     for(i = 0; i < MAX_CHANNELS; i++)
 	memset(channel[i].drums, 0, sizeof(channel[i].drums));
 
   play_end:
-    ctl_mode_event(CTLE_PLAY_END, 0, 0, 0);
+    if(current_file_info->pcm_tf){
+    	close_file(current_file_info->pcm_tf);
+    	current_file_info->pcm_tf = NULL;
+    	free( current_file_info->pcm_filename );
+    	current_file_info->pcm_filename = NULL;
+    }
+    
     if(wrdt->opened)
 	wrdt->end();
+
     if(free_instruments_afterwards)
     {
 	int cnt;
-	free_instruments();
+	free_instruments(0);
 	cnt = free_global_mblock(); /* free unused memory */
 	if(cnt > 0)
 	    ctl->cmsg(CMSG_INFO, VERB_VERBOSE, "%d memory blocks are free",
 		      cnt);
     }
+
     free_special_patch(-1);
+
     if(event != NULL)
 	free(event);
     if(rc == RC_RELOAD)
-	goto play_restart;
-    midi_restart_time = 0;
-    if(rc == RC_ERROR && last_rc == RC_REALLY_PREVIOUS)
-	return RC_REALLY_PREVIOUS;
+	goto play_reload;
+
+    if(rc == RC_ERROR)
+    {
+	if(current_file_info->file_type == IS_OTHER_FILE)
+	    current_file_info->file_type = IS_ERROR_FILE;
+	if(last_rc == RC_REALLY_PREVIOUS)
+	    return RC_REALLY_PREVIOUS;
+    }
     last_rc = rc;
     return rc;
 }
 
 void dumb_pass_playing_list(int number_of_files, char *list_of_files[])
 {
-    int i=0;
+    int i = 0;
 
-    for (;;)
+    for(;;)
+    {
+	switch(play_midi_file(list_of_files[i]))
 	{
-	  switch(play_midi_file(list_of_files[i]))
-	    {
-	    case RC_REALLY_PREVIOUS:
-		if (i>0)
-		    i--;
-		break;
+	  case RC_REALLY_PREVIOUS:
+	    if(i > 0)
+		i--;
+	    break;
 
-	    default: /* An error or something */
-	    case RC_NEXT:
-		if (i<number_of_files-1)
-		    {
-			i++;
-			break;
-		    }
-		play_mode->flush_output();
-		data_output_count = 0;
+	  default: /* An error or something */
+	  case RC_NEXT:
+	    if(i < number_of_files-1)
+	    {
+		i++;
+		break;
+	    }
+	    aq_flush(0);
+
+	    if(!(ctl->flags & CTLF_LIST_LOOP))
 		return;
+	    i = 0;
+	    break;
 
 	    case RC_QUIT:
 		return;
-	    }
 	}
+    }
 }
 
 void default_ctl_lyric(int lyricid)
@@ -3438,9 +5044,9 @@ void ctl_mode_event(int type, int trace, long arg1, long arg2)
     ce.type = type;
     ce.v1 = arg1;
     ce.v2 = arg2;
-    if(trace && ctl->trace_playing && !midi_trace.flush_flag)
+    if(trace && ctl->trace_playing)
 	push_midi_trace_ce(ctl->event, &ce);
-    else if(ctl->event != NULL)
+    else
 	ctl->event(&ce);
 }
 
@@ -3452,7 +5058,7 @@ void ctl_note_event(int noteID)
     ce.v2 = voice[noteID].channel;
     ce.v3 = voice[noteID].note;
     ce.v4 = voice[noteID].velocity;
-    if(ctl->trace_playing && !midi_trace.flush_flag)
+    if(ctl->trace_playing)
 	push_midi_trace_ce(ctl->event, &ce);
     else
 	ctl->event(&ce);
@@ -3473,32 +5079,70 @@ static void ctl_timestamp(void)
     ce.type = CTLE_CURRENT_TIME;
     ce.v1 = last_secs = secs;
     ce.v2 = last_voices = voices;
-    if(ctl->trace_playing && !midi_trace.flush_flag)
+    if(ctl->trace_playing)
 	push_midi_trace_ce(ctl->event, &ce);
     else
 	ctl->event(&ce);
+}
+
+static void ctl_updatetime(int32 samples)
+{
+    long secs;
+    secs = (long)(samples / (midi_time_ratio * play_mode->rate));
+    ctl_mode_event(CTLE_CURRENT_TIME, 0, secs, 0);
+    ctl_mode_event(CTLE_REFRESH, 0, 0, 0);
 }
 
 static void ctl_prog_event(int ch)
 {
     CtlEvent ce;
+    int bank, prog;
+
+    if(IS_CURRENT_MOD_FILE)
+    {
+	bank = 0;
+	prog = channel[ch].special_sample;
+    }
+    else
+    {
+	bank = channel[ch].bank;
+	prog = channel[ch].program;
+    }
+
     ce.type = CTLE_PROGRAM;
     ce.v1 = ch;
-    ce.v2 = channel[ch].program;
+    ce.v2 = prog;
     ce.v3 = (long)channel_instrum_name(ch);
-    if(ctl->trace_playing && !midi_trace.flush_flag)
+    ce.v4 = (bank |
+	     (channel[ch].bank_lsb << 8) |
+	     (channel[ch].bank_msb << 16));
+    if(ctl->trace_playing)
 	push_midi_trace_ce(ctl->event, &ce);
     else
 	ctl->event(&ce);
 }
 
+static void ctl_pause_event(int pause, int32 s)
+{
+    long secs;
+    secs = (long)(s / (midi_time_ratio * play_mode->rate));
+    ctl_mode_event(CTLE_PAUSE, 0, pause, secs);
+}
+
 char *channel_instrum_name(int ch)
 {
     char *comm;
-    int bank;
+    int bank, prog;
 
-    if(ISDRUMCHANNEL(ch))
-	return "";
+    if(ISDRUMCHANNEL(ch)) {
+	bank = channel[ch].bank;
+	if (drumset[bank] == NULL) return "";
+	prog = 0;
+	comm = drumset[bank]->tone[prog].comment;
+	if (comm == NULL) return "";
+	return comm;
+    }
+
     if(channel[ch].program == SPECIAL_PROGRAM)
 	return "Special Program";
 
@@ -3514,10 +5158,82 @@ char *channel_instrum_name(int ch)
     }
 
     bank = channel[ch].bank;
+    prog = channel[ch].program;
+    instrument_map(channel[ch].mapID, &bank, &prog);
     if(tonebank[bank] == NULL)
 	bank = 0;
-    comm = tonebank[bank]->tone[channel[ch].program].comment;
+    comm = tonebank[bank]->tone[prog].comment;
     if(comm == NULL)
-	comm = tonebank[0]->tone[channel[ch].program].comment;
+	comm = tonebank[0]->tone[prog].comment;
     return comm;
+}
+
+
+/*
+ * For MIDI stream player.
+ */
+void playmidi_stream_init(void)
+{
+    int i;
+    static int first = 1;
+
+    note_key_offset = 0;
+    midi_time_ratio = 1.0;
+    midi_restart_time = 0;
+    if(first)
+    {
+	first = 0;
+        init_mblock(&playmidi_pool);
+	current_file_info = get_midi_file_info("TiMidity", 1);
+    }
+    else
+        reuse_mblock(&playmidi_pool);
+
+    /* Fill in current_file_info */
+    current_file_info->readflag = 1;
+    current_file_info->seq_name = safe_strdup("TiMidity server");
+    current_file_info->karaoke_title = current_file_info->first_text = NULL;
+    current_file_info->mid = 0x7f;
+    current_file_info->hdrsiz = 0;
+    current_file_info->format = 0;
+    current_file_info->tracks = 0;
+    current_file_info->divisions = 192; /* ?? */
+    current_file_info->time_sig_n = 4; /* 4/ */
+    current_file_info->time_sig_d = 4; /* /4 */
+    current_file_info->time_sig_c = 24; /* clock */
+    current_file_info->time_sig_b = 8;  /* q.n. */
+    current_file_info->samples = 0;
+    current_file_info->max_channel = MAX_CHANNELS;
+    current_file_info->compressed = 0;
+    current_file_info->midi_data = NULL;
+    current_file_info->midi_data_size = 0;
+    current_file_info->file_type = IS_OTHER_FILE;
+
+    current_play_tempo = 500000;
+    check_eot_flag = 0;
+
+    /* Setup default drums */
+    memcpy(&drumchannels, &current_file_info->drumchannels,
+	   sizeof(ChannelBitMask));
+    memcpy(&drumchannel_mask, &current_file_info->drumchannel_mask,
+	   sizeof(ChannelBitMask));
+    for(i = 0; i < MAX_CHANNELS; i++)
+	memset(channel[i].drums, 0, sizeof(channel[i].drums));
+    reset_midi(0);
+    change_system_mode(DEFAULT_SYSTEM_MODE);
+
+    playmidi_tmr_reset();
+}
+
+void playmidi_tmr_reset(void)
+{
+    int i;
+
+    aq_flush(0);
+    current_sample = 0;
+    buffered_count = 0;
+    buffer_pointer = common_buffer;
+    for(i = 0; i < MAX_CHANNELS; i++)
+	channel[i].lasttime = 0;
+    play_mode->acntl(PM_REQ_PLAY_START, NULL);
 }

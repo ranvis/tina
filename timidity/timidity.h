@@ -1,8 +1,6 @@
-#ifndef ___TIMIDITY_H_
-#define ___TIMIDITY_H_
 /*
     TiMidity++ -- MIDI to WAVE converter and player
-    Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+    Copyright (C) 1999-2002 Masanao Izumo <mo@goice.co.jp>
     Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
 
     This program is free software; you can redistribute it and/or modify
@@ -17,15 +15,28 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
+
+#ifndef ___TIMIDITY_H_
+#define ___TIMIDITY_H_
+
+#if defined(__WIN32__) && !defined(__W32__)
+#define __W32__
+#endif
 
 
 /* You could specify a complete path, e.g. "/etc/timidity.cfg", and
    then specify the library directory in the configuration file. */
 /* #define CONFIG_FILE "/etc/timidity.cfg" */
-#define CONFIG_FILE DEFAULT_PATH "/timidity.cfg"
+#ifndef CONFIG_FILE
 
+#ifdef DEFAULT_PATH
+#define CONFIG_FILE DEFAULT_PATH "/timidity.cfg"
+#else
+#define CONFIG_FILE PKGDATADIR "/timidity.cfg"
+#endif /* DEFAULT_PATH */
+#endif /* CONFIG_FILE */
 
 /* Filename extension, followed by command to run decompressor so that
    output is written to stdout. Terminate the list with a 0.
@@ -33,9 +44,8 @@
    Any file with a name ending in one of these strings will be run
    through the corresponding decompressor. If you don't like this
    behavior, you can undefine DECOMPRESSOR_LIST to disable automatic
-   decompression entirely.
+   decompression entirely. */
 
-   This is currently ignored for Win32. */
 #define DECOMPRESSOR_LIST { \
 			      ".gz",  "gunzip -c %s", \
 			      ".bz2", "bunzip2 -c %s", \
@@ -47,18 +57,15 @@
 			     0 }
 
 
-/* Define GUS/patch converter.
-   This is currently ignored for Win32.
- */
+/* Define GUS/patch converter. */
 #define PATCH_CONVERTERS { \
 			     ".wav", "wav2pat %s", \
 			     0 }
 
-
 /* When a patch file can't be opened, one of these extensions is
    appended to the filename and the open is tried again.
 
-   This is ignored for Win32, which uses only ".pat" (see the bottom
+   This is ignored for Windows, which uses only ".pat" (see the bottom
    of this file if you need to change this.) */
 #define PATCH_EXT_LIST { \
 			   ".pat", \
@@ -80,19 +87,6 @@
    a critical choice anymore. */
 #define DEFAULT_DRUMCHANNELS {10, -1}
 /* #define DEFAULT_DRUMCHANNELS {10, 16, -1} */
-
-/* Here is presence hack when stereo sampling.
- * 0: right first
- * 1: left first
- * 2: both
- * -1: not use at default. (It needs the option -b)
- */
-#define PRESENCE_HACK -1
-
-#ifdef PRESENCE_HACK
-#define PRESENCE_DELAY 0.025
-#endif /* PRESENCE_HACK */
-
 
 /* type of floating point number */
 typedef double FLOAT_T;
@@ -116,7 +110,7 @@ typedef double FLOAT_T;
 #define DEFAULT_RATE	32000
 #endif /* DEFAULT_RATE */
 
-#define DEFAULT_VOICES	32
+#define DEFAULT_VOICES	64
 #define MAX_VOICES	256
 
 
@@ -136,10 +130,15 @@ typedef double FLOAT_T;
    You should probably use a larger number for improved performance.
 
 */
-#ifdef __WIN32__
-#define AUDIO_BUFFER_BITS 12
+
+#define AUDIO_BUFFER_BITS 12	/* Maxmum audio buffer size (2^bits) */
+
+#ifndef DEFAULT_AUDIO_BUFFER_BITS
+#ifdef __W32__
+#define DEFAULT_AUDIO_BUFFER_BITS 12
 #else
-#define AUDIO_BUFFER_BITS 11
+#define DEFAULT_AUDIO_BUFFER_BITS 11
+#endif
 #endif
 
 
@@ -149,9 +148,21 @@ typedef double FLOAT_T;
 #define CONTROLS_PER_SECOND 1000
 
 
+#if !defined(LINEAR_INTERPOLATION) && \
+    !defined(CSPLINE_INTERPOLATION) && \
+    !defined(LAGRANGE_INTERPOLATION) && \
+    !defined(NO_INTERPOLATION)
 /* Strongly recommended. This option increases CPU usage by half, but
    without it sound quality is very poor. */
 #define LINEAR_INTERPOLATION
+
+/* These option enable a multi-point interpolation in resampling.
+   Defining CSPLINE_INTERPOLATION cause 4-point interpolation by cubic
+   spline curve.  Defining LAGRANGE_INTERPOLATION cause 4-point
+   interpolation by Lagrange method. */
+/* #define CSPLINE_INTERPOLATION */
+/* #define LAGRANGE_INTERPOLATION */
+#endif
 
 
 /* This is an experimental kludge that needs to be done right, but if
@@ -165,9 +176,12 @@ typedef double FLOAT_T;
 
    Defining LOOKUP_HACK should save ~20% of CPU on an Intel machine.
    LOOKUP_INTERPOLATION might give another ~5% */
-/* #define LOOKUP_HACK
-   #define LOOKUP_INTERPOLATION */
+/* #define LOOKUP_HACK */
+/* #define LOOKUP_INTERPOLATION */
 
+/* Greatly reduces popping due to large volume/pan changes.
+ * This is definately worth the slight increase in CPU usage. */
+#define SMOOTH_MIXING
 
 /* Make envelopes twice as fast. Saves ~20% CPU time (notes decay
    faster) and sounds more like a GUS. There is now a command line
@@ -277,7 +291,7 @@ typedef double FLOAT_T;
 #define OUTPUT_TEXT_CODE "ASCII"
 #else
 /* Japanese */
-#ifndef __WIN32__
+#ifndef __W32__
 /* UNIX (Select "AUTO" or "ASCII" or "NOCNV" or "EUC" or "JIS" or "SJIS") */
 #define OUTPUT_TEXT_CODE "AUTO"
 #else
@@ -288,52 +302,52 @@ typedef double FLOAT_T;
 
 
 /* Undefine if you don't use modulation wheel MIDI controls.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 #define MODULATION_WHEEL_ALLOW
 
 
 /* Undefine if you don't use portamento MIDI controls.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 #define PORTAMENTO_ALLOW
 
 
 /* Undefine if you don't use NRPN vibrato MIDI controls
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 #define NRPN_VIBRATO_ALLOW
 
 
 /* Define if you want to use reverb controls in defaults.
  * This mode needs high CPU power.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
-/* #define REVERB_CONTROL_ALLOW */
+#define REVERB_CONTROL_ALLOW
 
 
 /* Define if you want to use chorus controls in defaults.
  * This mode needs high CPU power.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
-/* #define CHORUS_CONTROL_ALLOW */
+#define CHORUS_CONTROL_ALLOW
 
 
 /* Define if you want to use channel pressure.
  * Channel pressure effect is different in sequencers.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 /* #define GM_CHANNEL_PRESSURE_ALLOW */
 
 
 /* Define if you want to trace text meta event at playing.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 /* #define ALWAYS_TRACE_TEXT_META_EVENT */
 
 
 /* Define if you want to allow overlapped voice.
- * There is now a command line option to enable/disable this mode.
+ * There is a command line option to enable/disable this mode.
  */
 #define OVERLAP_VOICE_ALLOW
 
@@ -396,7 +410,8 @@ extern int volatile_touch(void* dmy);
 #endif
 
 /* DEC MMS has 64 bit long words */
-#if defined(DEC)
+/* Linux-Axp has also 64 bit long words */
+#if defined(DEC) || defined(__alpha__)
 typedef unsigned int uint32;
 typedef int int32;
 #else
@@ -488,7 +503,7 @@ typedef struct _ChannelBitMask
 #ifdef LOOKUP_HACK
    typedef int8 sample_t;
    typedef uint8 final_volume_t;
-#  define FINAL_VOLUME(v) (~_l2u[v])
+#  define FINAL_VOLUME(v) ((final_volume_t)~_l2u[v])
 #  define MIXUP_SHIFT 5
 #  define MAX_AMP_VALUE 4095
 #else
@@ -540,23 +555,10 @@ typedef struct _ChannelBitMask
 /* Solaris */
 int usleep(unsigned int useconds); /* shut gcc warning up */
 #endif
-  extern int opterr;
-  extern int optind;
-  extern int optopt;
-  extern char *optarg;
-#ifndef SEEK_SET
-#define SEEK_SET 0
-#endif
-#ifndef SEEK_CUR
-#define SEEK_CUR 1
-#endif
-#ifndef SEEK_END
-#define SEEK_END 2
-#endif
 #endif /* sun */
 
 
-#ifdef __WIN32__
+#ifdef __W32__
 #undef PATCH_EXT_LIST
 #define PATCH_EXT_LIST { ".pat", 0 }
 
@@ -564,9 +566,17 @@ int usleep(unsigned int useconds); /* shut gcc warning up */
 #endif
 
 /* The path separator (D.M.) */
-#if defined(__WIN32__)
+/* Windows: "\"
+ * Cygwin:  both "\" and "/"
+ * Macintosh: ":"
+ * Unix: "/"
+ */
+#if defined(__W32__)
 #  define PATH_SEP '\\'
 #  define PATH_STRING "\\"
+#if defined(__CYGWIN32__) || defined(__MINGW32__)
+#  define PATH_SEP2 '/'
+#endif
 #elif defined(__MACOS__)
 #  define PATH_SEP ':'
 #  define PATH_STRING ":"
@@ -575,15 +585,21 @@ int usleep(unsigned int useconds); /* shut gcc warning up */
 #  define PATH_STRING "/"
 #endif
 
+#ifdef PATH_SEP2
+#define IS_PATH_SEP(c) ((c) == PATH_SEP || (c) == PATH_SEP2)
+#else
+#define IS_PATH_SEP(c) ((c) == PATH_SEP)
+#endif
+
 /* new line code */
 #ifndef NLS
-#ifdef __WIN32__
-#ifdef __BORLANDC__
+#ifdef __W32__
+#if defined(__BORLANDC__) || defined(__CYGWIN32__) || defined(__MINGW32__)
 #  define NLS "\n"
 #else
 #  define NLS "\r\n"
 #endif
-#else /* !__WIN32__ */
+#else /* !__W32__ */
 #  define NLS "\n"
 #endif
 #endif /* NLS */
@@ -594,15 +610,26 @@ int usleep(unsigned int useconds); /* shut gcc warning up */
 #define M_PI 3.14159265358979323846
 #endif /* M_PI */
 
-#ifndef __WIN32__
+#ifndef __W32__
 #undef MAIL_NAME
-#endif /* __WIN32__ */
+#endif /* __W32__ */
+
 
 #ifdef __BORLANDC__
 /* strncasecmp() -> strncmpi(char *,char *,size_t) */
 #define strncasecmp(a,b,c) strncmpi(a,b,c)
 #define strcasecmp(a,b) strcmpi(a,b)
 #endif /* __BORLANDC__ */
+
+#ifdef _MSC_VER
+#define strncasecmp(a,b,c)	_strnicmp((a),(b),(c))
+#define strcasecmp(a,b)		_stricmp((a),(b))
+#define open _open
+#define close _close
+#define write _write
+#define lseek _lseek
+#define unlink _unlink
+#endif /* _MSC_VER */
 
 #define SAFE_CONVERT_LENGTH(len) (6 * (len) + 1)
 
@@ -612,50 +639,11 @@ int usleep(unsigned int useconds); /* shut gcc warning up */
 #include "mac_com.h"
 #endif
 
-#if defined(__MACOS__) || defined(__WIN32__)
+#if !defined(HAVE_POPEN)
 #undef DECOMPRESSOR_LIST
 #undef PATCH_CONVERTERS
 #endif
 
-
-
-/* Follows are defined in utils/support.c */
-
-#ifndef HAVE_VSNPRINTF
-#include <stdarg.h> /* for va_list */
-extern void vsnprintf(char *buff, size_t bufsiz, const char *fmt, va_list ap);
-#endif
-
-#ifndef HAVE_SNPRINTF
-extern void snprintf(char *buff, size_t bufsiz, const char *fmt, ...);
-#endif /* HAVE_SNPRINTF */
-
-#ifndef HAVE_GETOPT
-extern int getopt(int argc, char *argv[], char *optionS);
-#endif /* HAVE_GETOPT */
-
-#ifndef HAVE_STRERROR
-extern char *strerror(int errnum);
-#endif /* HAVE_STRERROR */
-
-#ifndef HAVE_USLEEP
-extern int usleep(unsigned int usec);
-#endif
-
-#ifndef HAVE_STRDUP
-extern char *strdup(const char *s);
-#endif /* HAVE_STRDUP */
-
-#ifndef HAVE_GETCWD
-extern char *getcwd(char *buf, size_t size);
-#endif /* HAVE_GETCWD */
-
-#ifndef HAVE_STRSTR
-#define strstr(s,c)	index(s,c)
-#endif /* HAVE_STRSTR */
-
-#ifndef HAVE_STRNCASECMP
-int strncasecmp(char *s1, char *s2, unsigned int len);
-#endif /* HAVE_STRNCASECMP */
+#include "support.h"
 
 #endif /* ___TIMIDITY_H_ */
