@@ -63,10 +63,6 @@ extern char *getcwd(char *buf, size_t size);
 extern int strncasecmp(char *s1, char *s2, unsigned int len);
 #endif /* HAVE_STRNCASECMP */
 
-#ifndef HAVE_MKSTEMP
-extern int mkstemp(char *template);
-#endif /* HAVE_MKSTEMP */
-
 #ifndef HAVE_SYS_STAT_H
 #ifdef __W32__
 #include <sys/stat.h>          /* they have. */

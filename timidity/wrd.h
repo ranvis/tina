@@ -190,4 +190,6 @@ static inline void print_ecmd(char *cmd, int *args, int narg)
 }
 #endif
 
+extern int  neowrd_flg; /*toriaezu*/
+
 #endif /* ___WRD_H_ */

@@ -53,7 +53,7 @@ static int open_output(void); /* 0=success, 1=warning, -1=fatal error */
 static void close_output(void);
 static int output_data(char *buf, int32 in_bytes);
 static int acntl(int request, void *arg);
-static int total_bytes;
+//static int total_bytes;
 float output_volume = 1.0;
 
 int	    mac_buf_using_num;
@@ -105,7 +105,7 @@ static appGlobals	globals;
 
 
 /*********************************************************************/
-OSStatus appIOProc (AudioDeviceID  inDevice, const AudioTimeStamp*  inNow,
+static OSStatus appIOProc (AudioDeviceID  inDevice, const AudioTimeStamp*  inNow,
                     const AudioBufferList*  inInputData,
 		    const AudioTimeStamp*  inInputTime, 
                     AudioBufferList*  outOutputData,

@@ -159,6 +159,10 @@ extern ControlMode npsyn_control_mode;
 extern ControlMode macosx_control_mode;
 #endif /* IA_MACOSX */
 
+#ifdef IA_MACOSXSYN
+extern ControlMode macosx_syn_control_mode;
+#endif
+
 /* Minimal control mode */
 extern ControlMode dumb_control_mode;
 #ifndef DEFAULT_CONTROL_MODE
@@ -205,6 +209,10 @@ ControlMode *ctl_list[]={
 #ifdef IA_MACOSX
   &macosx_control_mode,
 #endif /* IA_MACOSX */
+#ifdef IA_MACOSXSYN
+  &macosx_syn_control_mode,
+#endif
+
 #ifdef IA_W32GUI
   &w32gui_control_mode,
 #endif /* IA_W32GUI */
