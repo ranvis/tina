@@ -1,0 +1,14 @@
+{
+    IBClasses = (
+        {CLASS = FirstResponder; LANGUAGE = ObjC; SUPERCLASS = NSObject; }, 
+        {CLASS = "ListData_Instruments"; LANGUAGE = ObjC; SUPERCLASS = NSObject; }, 
+        {
+            ACTIONS = {"change_volume" = id; }; 
+            CLASS = SynthController; 
+            LANGUAGE = ObjC; 
+            OUTLETS = {cmsg = NSTextView; instrumentsList = id; volume = NSSlider; }; 
+            SUPERCLASS = NSWindowController; 
+        }
+    ); 
+    IBVersion = 1; 
+}

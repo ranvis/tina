@@ -140,6 +140,6 @@ extern void sry_encode_bindata( char *code, const char *org, int len);
 extern int sry_decode_bindata( char *data );
 extern int wrd_read_sherry;
 
-
+extern int  neowrd_flg; /*toriaezu*/
 
 #endif /* ___WRD_H_ */

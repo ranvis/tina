@@ -5117,6 +5117,8 @@ int __cdecl main(int argc, char **argv)
 /* _MSC_VER, _BORLANDC_ */
 int win_main(int argc, char **argv)
 #endif
+#elif defined(IA_MACOSX) || defined(IA_MACOSXSYN)
+int mac_main(int argc, char **argv)
 #else /* UNIX */
 int main(int argc, char **argv)
 #endif
@@ -5191,6 +5193,10 @@ int main(int argc, char **argv)
     else if(strncmp(program_name,"xawmidi",7) == 0) set_ctl("a");
     else if(strncmp(program_name,"xskinmidi",9) == 0) set_ctl("i");
 
+#ifdef IA_MACOSX
+    set_ctl("m");
+#endif
+		
     if(argc == 1 && !strchr(INTERACTIVE_INTERFACE_IDS, ctl->id_character))
     {
 	interesting_message();

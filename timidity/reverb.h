@@ -61,13 +61,13 @@ extern float get_pink_noise_light(pink_noise *);
 #endif
 
 /*! LFO */
-typedef struct {
+typedef struct lfo_{
 	int32 buf[SINE_CYCLE_LENGTH];
 	int32 count, cycle;	/* in samples */
 	int32 icycle;	/* proportional to (SINE_CYCLE_LENGTH / cycle) */
 	int type;	/* current content of its buffer */
 	double freq;	/* in Hz */
-} lfo;
+} Lfo;
 
 enum {
 	LFO_NONE = 0,
@@ -330,7 +330,7 @@ typedef struct {
 /*! HEXA-CHORUS */
 typedef struct {
 	delay buf0;
-	lfo lfo0;
+	Lfo lfo0;
 	double dry, wet, level;
 	int32 pdelay, depth;	/* in samples */
 	int8 pdelay_dev, depth_dev, pan_dev;
@@ -347,7 +347,7 @@ typedef struct {
 	delay pd, od1l, od2l, od3l, od4l, od5l, od6l, od7l,
 		od1r, od2r, od3r, od4r, od5r, od6r, od7r,
 		td1, td2, td1d, td2d;
-	lfo lfo1, lfo1d;
+	Lfo lfo1, lfo1d;
 	allpass ap1, ap2, ap3, ap4, ap6, ap6d;
 	mod_allpass ap5, ap5d;
 	filter_lowpass1 lpf1, lpf2;
@@ -389,7 +389,7 @@ typedef struct {
 /*! Stereo Chorus Effect */
 typedef struct {
 	delay delayL, delayR;
-	lfo lfoL, lfoR;
+	Lfo lfoL, lfoR;
 	int32 wpt0, spt0, spt1, hist0, hist1;
 	int32 rpt0, depth, pdelay;
 	double level, feedback, send_reverb, send_delay;
@@ -399,7 +399,7 @@ typedef struct {
 /*! Chorus */
 typedef struct {
 	delay delayL, delayR;
-	lfo lfoL, lfoR;
+	Lfo lfoL, lfoR;
 	int32 wpt0, spt0, spt1, hist0, hist1;
 	int32 rpt0, depth, pdelay;
 	double dry, wet, feedback, pdelay_ms, depth_ms, rate, phase_diff;
@@ -483,7 +483,7 @@ typedef struct {
 	int8 lfo_depth, drive;
 	double resonance, lfo_freq, offset_freq, dry, wet;
 	int32 dryi, weti, fil_count, fil_cycle;
-	lfo lfo;
+	Lfo lfo;
 	filter_moog_dist fil0, fil1;
 } InfoXGAutoWah;
 

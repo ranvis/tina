@@ -227,7 +227,7 @@ static inline void do_delay(int32 *stream, int32 *buf, int32 size, int32 *index)
 }
 
 /*! LFO (low frequency oscillator) */
-static void init_lfo(lfo *lfo, double freq, int type, double phase)
+static void init_lfo(Lfo *lfo, double freq, int type, double phase)
 {
 	int32 i, cycle, diff;
 
@@ -259,7 +259,7 @@ static void init_lfo(lfo *lfo, double freq, int type, double phase)
 }
 
 /* returned value is between 0 and (1 << 16) */
-static inline int32 do_lfo(lfo *lfo)
+static inline int32 do_lfo(Lfo *lfo)
 {
 	int32 val;
 	val = lfo->buf[imuldiv24(lfo->count, lfo->icycle)];
@@ -1699,7 +1699,7 @@ static void do_ch_plate_reverb(int32 *buf, int32 count, InfoPlateReverb *info)
 	allpass *ap1 = &(info->ap1), *ap2 = &(info->ap2), *ap3 = &(info->ap3),
 		*ap4 = &(info->ap4), *ap6 = &(info->ap6), *ap6d = &(info->ap6d);
 	mod_allpass *ap5 = &(info->ap5), *ap5d = &(info->ap5d);
-	lfo *lfo1 = &(info->lfo1), *lfo1d = &(info->lfo1d);
+	Lfo *lfo1 = &(info->lfo1), *lfo1d = &(info->lfo1d);
 	filter_lowpass1 *lpf1 = &(info->lpf1), *lpf2 = &(info->lpf2);
 	int32 t1 = info->t1, t1d = info->t1d;
 	int32 decayi = info->decayi, ddif1i = info->ddif1i, ddif2i = info->ddif2i,
@@ -2833,7 +2833,7 @@ void do_dual_od(int32 *buf, int32 count, EffectList *ef)
 void do_hexa_chorus(int32 *buf, int32 count, EffectList *ef)
 {
 	InfoHexaChorus *info = (InfoHexaChorus *)ef->info;
-	lfo *lfo = &(info->lfo0);
+	Lfo *lfo = &(info->lfo0);
 	delay *buf0 = &(info->buf0);
 	int32 *ebuf = buf0->buf, size = buf0->size, index = buf0->index;
 	int32 spt0 = info->spt0, spt1 = info->spt1, spt2 = info->spt2,
@@ -3969,7 +3969,7 @@ static void do_xg_auto_wah(int32 *buf, int32 count, EffectList *ef)
 	int32 i, x, y, val;
 	InfoXGAutoWah *info = (InfoXGAutoWah *)ef->info;
 	filter_moog_dist *fil0 = &(info->fil0), *fil1 = &(info->fil1);
-	lfo *lfo = &(info->lfo);
+	Lfo *lfo = &(info->lfo);
 	int32 dryi = info->dryi, weti = info->weti, fil_cycle = info->fil_cycle;
 	int8 lfo_depth = info->lfo_depth;
 	double yf, offset_freq = info->offset_freq;
