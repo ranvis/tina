@@ -1,0 +1,40 @@
+
+■How to Make
+1.libpingを入手
+ http://www.libpng.org/pub/png/libpng.html
+
+2.ソースディレクトリと同じ並びにおく
+
+　　　---libpng-x.x.x
+  +-TiMidity-cocoa---
+                +-macosx
+3.libpng-x.x.xにシンボリックリンクを張る
+
+%　ln -s libpng-x.x.x libpng
+
+4.TiMidity.xcodeを開いてビルド
+
+
+■コンパイルオプション　めも
+-DHAVE_CONFIG_H
+ -DAU_DARWIN
+ -DENABLE_SHERRY
+
+
+リンカフラグ
+-lz
+
+■TODO
+液晶っぽい表示にしたい。
+LCD画面つくりたい。
+リストウィンドウを切り離して表示
+ログウィンドウはデフォルトで切り離して。（デバッグ専用）歌詞表示だけ表示する。
+日本語リソース
+ウィンドウのタイトルを曲のタイトルにする。
+コンパイルワーニングをなくす。
+http://～のオープンのインタフェース
+常駐してリアルタイムシンセサイザモード
+
+■バージョンアップ時設定するもの
+infoPlist.strings
+プロジェクト設定のバージョン文字列

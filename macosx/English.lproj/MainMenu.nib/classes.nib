@@ -1,0 +1,44 @@
+{
+    IBClasses = (
+        {CLASS = FirstResponder; LANGUAGE = ObjC; SUPERCLASS = NSObject; }, 
+        {CLASS = ListDataSource; LANGUAGE = ObjC; SUPERCLASS = NSObject; }, 
+        {
+            ACTIONS = {
+                backward = id; 
+                "change_volume" = id; 
+                foreward = id; 
+                loadPlayList = id; 
+                logClear = id; 
+                open = id; 
+                pause = id; 
+                play = id; 
+                preference = id; 
+                savePlayList = id; 
+                stop = id; 
+            }; 
+            CLASS = "Macosx_controller"; 
+            LANGUAGE = ObjC; 
+            OUTLETS = {
+                cmsg = id; 
+                doc = id; 
+                "i_voices" = id; 
+                list = id; 
+                slider = id; 
+                tabView = id; 
+                "time_indicator" = id; 
+                title = id; 
+                volume = id; 
+                window = id; 
+            }; 
+            SUPERCLASS = NSObject; 
+        }, 
+        {
+            ACTIONS = {cancel = id; ok = id; showPanel = id; }; 
+            CLASS = "Prefs_controller"; 
+            LANGUAGE = ObjC; 
+            SUPERCLASS = NSObject; 
+        }, 
+        {CLASS = WrdView; LANGUAGE = ObjC; SUPERCLASS = NSView; }
+    ); 
+    IBVersion = 1; 
+}

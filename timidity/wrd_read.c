@@ -117,8 +117,10 @@ static MBlockList sry_pool; /* data buffer */
 sry_datapacket *datapacket = NULL;
 #ifdef ENABLE_SHERRY
 static int datapacket_len, datapacket_cnt;
+int        neowrd_flg=0; /*toriaezu*/
 #define DEFAULT_DATAPACKET_LEN 16384
 static int import_sherrywrd_file(const char * );
+static int import_neowrd_file(const char *);
 #endif /* ENABLE_SHERRY */
 
 static uint8 cmdlookup(uint8 *cmd);
@@ -243,8 +245,11 @@ int import_wrd_file(char *fn)
     {
 	default_wrd_file1 = default_wrd_file2 = NULL;
 #ifdef ENABLE_SHERRY
+        neowrd_flg=0; 
 	if(import_sherrywrd_file(fn))
 	    return WRD_TRACE_SHERRY;
+        else if(import_neowrd_file(fn))
+            return WRD_TRACE_SHERRY; //dummy
 #endif
 	return WRD_TRACE_NOTHING;
     }
@@ -1814,7 +1819,7 @@ struct sry_drawtext_{
 	char	back_color;
 	short	x;
 	short	y;
-	char	*text;
+	char	text[0];
 };
 typedef struct sry_drawtext_ sry_drawtext;
 
@@ -1939,26 +1944,26 @@ static void sry_timebase22(struct wrd_step_tracer* wrdstep, int mode)
 
 static void sry_wrdinfo(uint8 *info, int len)
 {
-    uint8 *info1, *info2, *desc;
+    char *info1, *info2, *desc;
     int i;
 
     /* "info1\0info2\0desc\0" */
     /* FIXME: Need to convert SJIS to "output_text_code" */
 
     i = 0;
-    info1 = info;
+    info1 = (char *)info;
     while(i < len && info[i])
 	i++;
     i++; /* skip '\0' */
     if(i >= len)
 	return;
-    info2 = info + i;
+    info2 = (char*)info + i;
     while(i < len && info[i])
 	i++;
     i++; /* skip '\0' */
     if(i >= len)
 	return;
-    desc = info + i;
+    desc = (char*)info + i;
 
     ctl->cmsg(CMSG_INFO, VERB_VERBOSE,
 	      "Sherry WRD: %s: %s: %s", info1, info2, desc);
@@ -2111,6 +2116,241 @@ static int import_sherrywrd_file(const char * fn)
     fflush(stdout);
 #endif /* DEBUG */
     return 1;
+}
+
+/***********************************************************************/
+/* NEO WRD                                                             */
+/***********************************************************************/
+static int neo_check_head(struct timidity_file	*tf)
+{
+	char	head[16];
+	
+	if( tf_read(head, 16,1,tf)!=1 ){
+		ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+			  "NeoWrd open::header read NG." );
+                return 1;
+        }
+	if( memcmp(head, "NEO\0", 4) ){
+		ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+			  "NeoWrd open::Header NG." );
+		return 1;
+	}
+	ctl->cmsg(CMSG_INFO, VERB_VERBOSE,
+		  "Neo WRD version: %02x %02x %02x %02x",
+		  head[4], head[5], head[6], head[7]);
+
+	return 0;	/*good*/
+}
+
+static int neo_read_headerblock(struct wrd_step_tracer* wrdstep,
+					struct timidity_file *tf)
+{   /* success-> rerutn 0;*/
+    /* fail   -> return -1;*/
+	sry_datapacket	packet;
+	int err;
+
+	packet.len = 1;
+	packet.data = (uint8 *)new_segment(&sry_pool, 1);
+	packet.data[0] = 0x01;
+	sry_regist_datapacket(wrdstep , &packet);
+	
+	for(;;){
+		err= sry_read_datapacket(tf, &packet);
+		if( err ) break;
+		//sry_regist_datapacket(wrdstep , &packet);
+		switch(packet.data[0])
+		{
+		  case 0x00: /* end of header */
+                    ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+			  "NeoWrd open::header read completed." );
+		    return 0;
+		  case 0x21:
+                    switch( packet.data[1] ){
+                      case 0x00:
+                        sry_timebase21(wrdstep, SRY_GET_SHORT(packet.data+2));
+                        ctl->cmsg(CMSG_WARNING, VERB_NORMAL,
+			  "Neo timebase: %d", SRY_GET_SHORT(packet.data+2) );
+                        break;
+                      case 0x01:
+                        /*not supported. fixme.*/
+                        ctl->cmsg(CMSG_WARNING, VERB_VERBOSE,
+                            "neo_read_headerblock: mode=1 not supported.");
+                        return -1;
+                        break;
+                      default:
+                        return -1;
+                        break;
+                    }
+		    break;
+		  case 0x61:
+		    sry_wrdinfo(packet.data + 1, packet.len - 1);
+		    break;
+		  default:
+		    if((packet.data[0] & 0x70) == 0x70)
+			sry_show_debug(packet.data);
+		    break;
+		}
+	}
+        return 0; /* read OK.*/
+}
+
+static void neo_REPP(const sry_datapacket* packet,
+        struct wrd_step_tracer* wrdstep,
+        struct timidity_file	*tf)
+{
+    sry_datapacket  rep_packet;
+    int		    delta_time;
+    int		    err,i;
+    int             rep_num=SRY_GET_SHORT(packet->data+1),
+                    interval;
+    const uint8    *chg_prm, *chg_prm_start;
+    
+    /*get interval*/
+    for(interval=0,i=0; i<4; i++){
+    	interval = (interval << 7) + (packet->data[3+i]&0x7f);
+        if( (packet->data[3+i]&0x80)==0 ){
+            break;
+        }
+    }
+    chg_prm_start = &packet->data[4+i];
+    
+    delta_time= sry_getVariableLength(tf);
+    err = sry_read_datapacket(tf, &rep_packet);
+    if( err ) return;
+    
+    
+    if( sherry_started && delta_time ){
+        wrdstep_inc(wrdstep,
+                    delta_time*current_file_info->divisions
+                    /wrdstep->timebase);
+    }
+    for(i=1; ; i++){
+        sry_regist_datapacket(wrdstep , &rep_packet);
+        if(i>=rep_num){
+            break;
+        }
+        if(sherry_started && interval){
+            wrdstep_inc(wrdstep,
+                    interval*current_file_info->divisions
+                    /wrdstep->timebase);
+        }
+        for( chg_prm=chg_prm_start; chg_prm<packet->data+packet->len; ){
+            switch(chg_prm[1]){
+            case 1:
+                rep_packet.data[chg_prm[0]+1] += chg_prm[2];
+                chg_prm +=3;
+                break;
+            case 2:
+                {
+                    uint16 tmp = SRY_GET_SHORT(&rep_packet.data[chg_prm[0]+1]),
+                           inc = SRY_GET_SHORT(&chg_prm[2]);
+                    tmp += inc;
+                    rep_packet.data[chg_prm[0]+1] = (tmp & 0x00ff);
+                    rep_packet.data[chg_prm[0]+2] = (tmp >> 8);            
+                    chg_prm += 4;
+                }
+                break;
+            default:
+                fprintf(stderr,"neo_REPP:param size NG\n");
+                break;
+            }
+        }
+    }
+}
+
+static void neo_read_datablock(struct wrd_step_tracer* wrdstep,
+				  struct timidity_file	*tf)
+{
+    sry_datapacket  packet;
+    int		    delta_time; /*, cur_time=0; */
+    int		    err;
+    //int		    need_update;
+
+    //need_update = 0;
+    for(;;){
+		delta_time= sry_getVariableLength(tf);
+		if(delta_time > 0 /*&& need_update*/)
+		{
+		    WRD_ADDEVENT(wrdstep->at, WRD_SHERRY_UPDATE, WRD_NOARG);
+		    //need_update = 0;
+		}
+		err = sry_read_datapacket(tf, &packet);
+		if( err ) break;
+
+		if( sherry_started && delta_time ){
+		    wrdstep_inc(wrdstep,
+				delta_time*current_file_info->divisions
+				/wrdstep->timebase);
+		}
+                
+		if( packet.data[0]==0x01 ){
+			sherry_started=1;
+			continue;
+		} else if( (packet.data[0]&0x70) == 0x70) {
+		    sry_show_debug(packet.data);
+		} else if(packet.data[0]==0x10){ /*repeat prefix command*/
+                    neo_REPP(&packet,wrdstep,tf);
+                    continue; //not need to regist.
+                }
+
+		sry_regist_datapacket(wrdstep , &packet);
+
+		if( packet.data[0] == 0x00 ) break;
+    }
+    //if(need_update)
+    {
+	WRD_ADDEVENT(wrdstep->at, WRD_SHERRY_UPDATE, WRD_NOARG);
+	//need_update = 0;
+    }
+}
+
+
+static int import_neowrd_file(const char * fn)
+{
+    char	neo_fn[256];
+    char	*cp;
+    struct timidity_file	*tf;
+    struct wrd_step_tracer wrdstep;
+    int    ret=1;
+    
+    ctl->cmsg(CMSG_INFO, VERB_NORMAL,
+                "%s: start reading neowrd...", fn);
+    strcpy(neo_fn, fn);
+    cp=strrchr(neo_fn, '.');
+    if( cp==0 ) return 0;
+    
+    strcpy(cp+1, "nbf");
+    tf= open_file( neo_fn, 0, OF_NORMAL);
+    if( tf==NULL ) return 0;
+    if( neo_check_head(tf)!=0 ) return 0;
+    ctl->cmsg(CMSG_INFO, VERB_NORMAL,
+                "%s: reading neowrd data...", neo_fn);
+    
+    wrd_readinit();
+    memset(&wrdstep, 0, sizeof(wrdstep));
+
+/**********************/
+    if( neo_read_headerblock( &wrdstep, tf)!=0 ){
+        ret = 0;
+        goto neo_import_exit;
+    }
+    neo_read_datablock( &wrdstep, tf);
+
+/*  end_of_wrd: */
+    while(wrdstep.de)
+    {
+	wrdstep_nextbar(&wrdstep);
+    }
+    reuse_mblock(&wrdstep.pool);
+    ctl->cmsg(CMSG_INFO, VERB_NORMAL, "done.");
+
+ neo_import_exit:
+    close_file(tf);
+#ifdef DEBUG
+    fflush(stdout);
+#endif /* DEBUG */
+    neowrd_flg=1; /*toriaezu*/
+    return ret;
 }
 
 #endif /*ENABLE_SHERRY*/
