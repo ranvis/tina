@@ -1,0 +1,878 @@
+dnl TiMidity++ -- MIDI to WAVE converter and player
+dnl Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+dnl Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+dnl 
+dnl This program is free software; you can redistribute it and/or modify
+dnl it under the terms of the GNU General Public License as published by
+dnl the Free Software Foundation; either version 2 of the License, or
+dnl (at your option) any later version.
+dnl 
+dnl This program is distributed in the hope that it will be useful,
+dnl but WITHOUT ANY WARRANTY; without even the implied warranty of
+dnl MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+dnl GNU General Public License for more details.
+dnl 
+dnl You should have received a copy of the GNU General Public License
+dnl along with this program; if not, write to the Free Software
+dnl Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+dnl Template file for GNU Autoconf
+dnl Process this file with autoconf to produce a configure script.
+dnl (C)Copyright 1998 by Hiroshi Takekawa <t80679@hongo.ecc.u-tokyo.ac.jp>
+
+dnl modified for automake by Isaku Yamahata <yamahata@kusm.kyoto-u.ac.jp>
+dnl modified for automake by Masanao Izumo <mo@goice.co.jp> (1998.11)
+
+
+dnl variable note:
+dnl CFLAGS	- Flags for compile.
+dnl CPPFLAGS	- Flags for cpp
+dnl LDFLAGS	- Flags for linker
+dnl		ac_cpp:     $CPP $CPPFLAGS
+dnl		ac_compile: ${CC-cc} -c $CFLAGS $CPPFLAGS
+dnl		ac_link:    ${CC-cc} -o * $CFLAGS $CPPFLAGS $LDFLAGS *.c $LIBS
+dnl EXTRACFLAGS - Extra flags to compile.  Adds to CFLAGS.
+dnl EXTRADEFS   - Extra define macros.  Adds to CPPFLAGS.
+dnl EXTRALIBS   - Extra libraries  Adds to LIBS.
+dnl SYSEXTRAS   - Additional source codes to compile.
+dnl lib_*_opt   - Optional libraries. Adds to LIBS.
+dnl LIBRARY_PATH
+dnl		- add to -L LDFLAGS
+dnl C_INCLUDE_PATH
+dnl		- add to -I CPPFLAGS
+dnl CYGNUS	- `yes' if cygnus windows environment.
+dnl WISH        - wish
+dnl LN_S	- ln -s
+dnl tcltk_dep	- make dependencies for tcl/tk interface
+
+dnl so		- File extension of shared object library.
+dnl SHLD	- Linker to make shared object library.
+dnl SHLDFLAGS	- Link flags to link shared object library.
+dnl SHCFLAGS	- Additional flags to compile shared object library.
+		  (such as -fPIC)
+
+
+AC_INIT(timidity/timidity.c)
+AC_CANONICAL_SYSTEM
+AM_INIT_AUTOMAKE(TiMidity++, 1.3.10, no-define)
+
+dnl To use CONTAINS() macro (See acinclude.m4)
+CONTAINS_INIT
+
+dnl use config.h
+AM_CONFIG_HEADER(config.h interface.h)
+
+dnl Checks for programs.
+AM_PATH_LISPDIR
+
+dnl CFLAGS default
+AC_ARG_ENABLE(debug,
+  [  --enable-debug          Build a debugging version.],
+  [ if test "$enableval" = "yes"; then
+      CFLAGS="$CFLAGS -g"
+    fi ], [ CFLAGS=${CFLAGS:--O2} ])
+
+EXTRACFLAGS=
+EXTRADEFS=
+EXTRALIBS=
+SYSEXTRAS=
+
+dnl X library dependent
+lib_xm_opt=
+lib_xaw_opt=
+lib_xmu_opt=
+lib_xt_opt=
+lib_xprelibs_opt=
+lib_xext_opt=
+lib_dl_opt=
+lib_curses_opt=
+lib_user32_opt=
+lib_user32_test=
+
+WISH=${WISH:-wish}
+tcltk_dep=
+
+dnl check gcc environment
+for i in `echo $LIBRARY_PATH|sed -e 's,:, ,g'`; do
+    LDFLAGS="$LDFLAGS -L${i}"
+done
+for i in `echo $C_INCLUDE_PATH|sed -e 's,:, ,g'`; do
+    CPPFLAGS="$CPPFLAGS -I${i}"
+done
+
+dnl add prefix /usr/local by default
+LDFLAGS="$LDFLAGS -L/usr/local/lib"
+CPPFLAGS="$CPPFLAGS -I/usr/local/include"
+SHLDFLAGS=${SHLDFLAGS:-$LDFLAGS}
+
+dnl add $prefix if specified.
+if test "x$prefix" != xNONE -a "x$prefix" != "x$ac_default_prefix" -a "x$prefix" != "x/usr"; then
+  LDFLAGS="-L$prefix/lib $LDFLAGS"
+  SHLDFLAGS="-L$prefix/lib $SHLDFLAGS"
+  CPPFLAGS="-I$prefix/include $CPPFLAGS"
+fi
+
+
+AC_PROG_CC
+AC_PROG_INSTALL
+AC_PROG_RANLIB
+AC_PROG_LN_S
+
+
+dnl Target dependent
+case "$target" in
+  *-*-hpux*)
+    EXTRADEFS="-DHPUX"
+    test -n "$SHLD" || SHLD="ld -b"
+    so="sl"
+    ;;
+  *-sgi-irix*)
+    dnl IRIX cc needs -signed option
+    case ".$CC" in .cc*) EXTRACFLAGS="-signed";; esac
+    test -n "$SHLD" || SHLD="cc -shared -all"
+    so="so"
+    ;;
+  *-*-netbsd*)
+    test -n "$SHLD" || SHLD="ld -Bforcearchive -Bshareable"
+    so="so"
+    ;;
+
+#  *-*-freebsd2*)
+#    EXTRALIBS="$EXTRALIBS -lxpg4"
+#    test -n "$SHLD" || SHLD="ld -Bshareable"
+#    so="so"
+#    ;;
+#  *-*-freebsd*)
+#    SHCFLAGS=-aout
+#    EXTRALIBS="$EXTRALIBS -lxpg4"
+#    SHLDFLAGS="-L/usr/X11R6/lib/aout $SHLDFLAGS"
+#    test -n "$SHLD" || SHLD="env OBJFORMAT=aout ld -shared"
+#    so="so"
+#    ;;
+
+  *-*-freebsd*)
+    EXTRALIBS="$EXTRALIBS -lxpg4"
+    test -n "$SHLD" || SHLD="ld -Bshareable"
+    so="so"
+    ;;
+  *-*-cygwin32*)
+    EXTRADEFS="-D__WIN32__"
+    # ??
+    case "x${CC} " in
+      "xbcc32 "*) test -n "$SHLD" || SHLD="tlink32 -Tpd" ;;
+      "xcl "*) test -n "$SHLD" || SHLD="link -dll" ;;
+      "xgcc "*) test -n "$SHLD" || SHLD="gcc -mdll" ;;
+      *) test -n "$SHLD" || SHLD="unknown" ;;
+    esac
+    so="dll"
+    CYGNUS=yes
+    lib_user32_test=-luser32
+    ;;
+  *-dec-*)
+    EXTRADEFS="-DDEC"
+    test -n "$SHLD" || SHLD="ld -Bdynamic -G"
+    so="so"
+    ;;
+  *-*-solaris*)
+    EXTRADEFS="-DSOLARIS"
+    test -n "$SHLD" || SHLD="/usr/ccs/bin/ld -G"
+    so="so"
+    ;;
+  *)
+    test -n "$SHLD" || SHLD="ld -Bdynamic -G"
+    so="so"
+    ;;
+esac
+
+dnl For .exe
+AM_EXEEXT
+
+AC_CHECK_LIB(m,sqrt)
+AC_CHECK_LIB(socket,socket)
+AC_CHECK_LIB(dl,dlopen,lib_dl_opt=-ldl)
+AC_CHECK_FUNCS(gethostbyname,,[ AC_CHECK_LIB(nsl,gethostbyname) ])
+AC_PATH_XTRA
+
+dnl Start of X configure
+if test "x$with_x" = xyes; then
+  if test "x$have_x" = xno; then
+    AC_MSG_ERROR(Could not configure X)
+  fi
+  if test "x$x_libraries" != x; then
+    ldflags_x_opt="-L$x_libraries"
+    LDFLAGS="$LDFLAGS $ldflags_x_opt"
+    SHLDFLAGS="$SHLDFLAGS $ldflags_x_opt"
+  else
+    ldflags_x_opt=
+  fi
+  if test "x$x_includes" != x; then
+    CPPFLAGS="$CPPFLAGS -I$x_includes"
+  fi
+
+  AC_CHECK_LIB(X11,XOpenDisplay)
+  AC_MSG_CHECKING(X11 version 6)
+  AC_CACHE_VAL(timidity_cv_x11_version_6,
+  AC_TRY_LINK([#include <X11/Xlib.h>],
+[#if XlibSpecificationRelease < 6
+fail;
+#endif
+], timidity_cv_x11_version_6=yes, timidity_cv_x11_version_6=no))
+  if test "$timidity_cv_x11_version_6" = "yes"; then
+    AC_MSG_RESULT(6 or newer)
+    dnl AC_DEFINE(HAVE_X11R6)
+  else
+    AC_MSG_RESULT(before 6)
+  fi
+
+  dnl checking order required
+  KEEPLIBS=$LIBS
+  AC_CHECK_LIB(Xext,XShapeCombineMask,have_xext=yes; LIBS="-lXext $LIBS",
+    have_xext=no)
+  AC_CHECK_LIB(ICE,IceConnectionNumber)
+  AC_CHECK_LIB(SM,SmcOpenConnection,have_xprelibs=yes; LIBS="-lSM $LIBS",
+    have_xprelibs=no)
+  AC_CHECK_LIB(Xt,XtVaAppInitialize,have_xt=yes; LIBS="-lXt $LIBS",have_xt=no)
+  AC_CHECK_LIB(Xmu,XmuInternAtom,LIBS="-lXmu $LIBS")
+  AC_CHECK_LIB(Xaw3d,XawInitializeWidgetSet,have_xaw=3d,
+   [ AC_CHECK_LIB(Xaw,XawInitializeWidgetSet,have_xaw=yes,have_xaw=no) ])
+  AC_CHECK_LIB(Xm,XmCreateForm,have_xm=yes,have_xm=no)
+  LIBS=$KEEPLIBS
+fi
+dnl End of X configure
+
+
+AC_HEADER_DIRENT
+AC_HEADER_STDC
+AC_HEADER_SYS_WAIT
+AC_CHECK_HEADERS(fcntl.h limits.h malloc.h strings.h sys/ioctl.h sys/time.h \
+	unistd.h dlfcn.h glob.h getopt.h errno.h machine/endian.h sys/types.h \
+	sys/param.h)
+AC_CHECK_HEADER(string.h,, [ EXTRADEFS="$EXTRADEFS -DNO_STRING_H " ])
+
+dnl Checks for typedefs, structures, and compiler characteristics.
+AC_C_CONST
+AC_C_CHAR_UNSIGNED
+AC_C_BIGENDIAN
+AC_C_INLINE
+AC_TYPE_OFF_T
+AC_TYPE_PID_T
+AC_TYPE_SIZE_T
+AC_HEADER_TIME
+
+AC_CACHE_CHECK(volatile declaration,timidity_cv_type_volatile,
+  AC_TRY_COMPILE(,volatile int x,
+	timidity_cv_type_volatile=yes,timidity_cv_type_volatile=no))
+if test $timidity_cv_type_volatile = no; then
+  EXTRADEFS="$EXTRADEFS -DNO_VOLATILE"
+fi
+
+AC_CACHE_CHECK(union semun declaration,timidity_cv_type_union_semun,
+  AC_TRY_COMPILE(
+[#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>],
+    union semun x,
+    timidity_cv_type_union_semun=yes,timidity_cv_type_union_semun=no))
+if test $timidity_cv_type_union_semun = yes; then
+  EXTRADEFS="$EXTRADEFS -DHAVE_UNION_SEMUN"
+fi
+
+
+dnl Checks for library functions.
+
+AC_PROG_GCC_TRADITIONAL
+AC_FUNC_MEMCMP
+AC_FUNC_MMAP
+AC_FUNC_SETVBUF_REVERSED
+AC_TYPE_SIGNAL
+AC_FUNC_VPRINTF
+AC_CHECK_FUNCS(gettimeofday select socket strdup strstr vsnprintf snprintf \
+	sleep usleep strncasecmp strerror getopt getcwd)
+
+
+dnl checking on cygnus
+if test "x$CYGNUS" = xyes; then
+  case "$ac_cv_header_dirent_dirent_h$ac_cv_header_dirent_sys_ndir_h$ac_cv_header_dirent_sys_dir_h$ac_cv_header_dirent_ndir_h" in
+  *yes*)
+    AC_CHECK_FUNC(opendir,,
+	[ EXTRADEFS="$EXTRADEFS -D__W32READDIR__"
+	  W32READDIR=yes ])
+    ;;
+  *)EXTRADEFS="$EXTRADEFS -D__W32READDIR__"
+    W32READDIR=yes
+    ;;
+  esac
+  if test "x$enable_network" = "xyes"; then
+    AC_CHECK_FUNC(socket,,
+      WAPI_CHECK_LIB(wsock32,WSAStartup,
+	[#include <winsock.h>],
+	[WSAStartup(0,0);],
+	[ EXTRALIBS="$EXTRALIBS -lwsock32"
+	  EXTRADEFS="$EXTRADEFS -DWINSOCK" ]))
+  fi
+fi
+
+
+dnl tcltk path
+AC_ARG_WITH(tcl-includes,
+  [  --with-tcl-includes=dir Tcl include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    tcl_include_dir="-I$withval"
+  ])
+AC_ARG_WITH(tcl-libs,
+  [  --with-tcl-libs=dir     Tcl include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    tcl_libdir="-L$withval" ])
+AC_ARG_WITH(tk-includes,
+  [  --with-tk-includes=dir  Tk include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    tk_includes="-I$withval" ])
+AC_ARG_WITH(tk-libs,
+  [  --with-tk-libs=dir      Tk include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    tk_libdir="-L$withval" ])
+
+dnl offix paths
+AC_ARG_WITH(offix-includes,
+  [  --with-offix-includes=dir  Offix include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    offix_include_dir="-I$withval" ])
+AC_ARG_WITH(offix-libs,
+  [  --with-offix-libs=dir      Offix include file path ],
+  [ if test ! -d $withval; then
+      AC_MSG_WARN($withval is not found.)
+    fi
+    offix_lib_dir="-L$withval" ])
+
+
+AC_MSG_CHECKING(whether to enable audio)
+AC_ARG_ENABLE(audio,
+  [  --enable-audio          Enable audio (default if you use supported platform)  ],
+  [ enable_audio=$enableval ],
+  [ enable_audio=yes ])
+
+if test "$enable_audio" = "yes"; then
+  case "$target" in 
+    *-*-linux*|*-*-freebsd*)
+      EXTRADEFS="$EXTRADEFS -DAU_LINUX"
+      SYSEXTRAS="$SYSEXTRAS linux_a.c"
+      AC_MSG_RESULT(yes linux)
+      KEEPCFLAGS=$CFLAGS
+      KEEPLIBS=$LIBS
+      KEEPLDFLAGS=$LDFLAGS
+      AM_PATH_ALSA_LOCAL()
+      CFLAGS=$KEEPCFLAGS
+      LIBS=$KEEPLIBS
+      LDFLAGS=$KEEPLDFLAGS
+      if test "x$have_alsa" = "xyes"; then
+          EXTRADEFS="$EXTRADEFS -DAU_ALSA"
+          SYSEXTRAS="$SYSEXTRAS alsa_a.c"
+          EXTRACT_CPPFLAGS(CPPFLAGS,CFLAGS,$ALSA_CFLAGS)
+          LIBS="$LIBS $ALSA_LIBS"
+      fi
+      ;;
+    *-*-bsdi2.0)
+      EXTRADEFS="$EXTRADEFS -DAU_BSDI -DDEFAULT_RATE=22500"
+      SYSEXTRAS="$SYSEXTRAS bsd20_a.c"
+      AC_MSG_RESULT(yes bsdi)
+      ;;
+    *-*-bsdi2.1|*-*-bsdi3.?|*-*-bsdi4.?)
+      EXTRADEFS="$EXTRADEFS -DAU_LINUX"
+      SYSEXTRAS="$SYSEXTRAS linux_a.c"
+      AC_MSG_RESULT(yes bsdi)
+      ;;
+    *-*-hpux*)
+      EXTRADEFS="$EXTRADEFS -DAU_HPUX"
+      SYSEXTRAS="$SYSEXTRAS hpux_d_a.c hpux_a.c"
+      if test -d /opt/audio/include; then
+        CPPFLAGS="$CPPFLAGS -I/opt/audio/include"
+      fi
+      if test -d /opt/audio/lib; then
+        EXTRALIBS="$EXTRALIBS -L/opt/audio/lib"
+      fi
+      EXTRALIBS="$EXTRALIBS -lAlib"
+      AC_MSG_RESULT(yes hpux)
+      ;;
+    *-dec-*)
+      EXTRADEFS="$EXTRADEFS -DAU_DEC -DAU_AUDRIV"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_mme.c"
+      CPPFLAGS="$CPPFLAGS -I/usr/opt/MME210/include"
+      EXTRALIBS="$EXTRALIBS /usr/opt/MME220/lib/libmme.a"
+      AC_MSG_RESULT(yes dec)
+      ;;
+    *-sgi-irix5*|*-sgi-irix6.2)
+      EXTRADEFS="$EXTRADEFS -DAU_AUDRIV -DSGI_OLDAL"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_al.c"
+      EXTRALIBS="$EXTRALIBS -laudio"
+      AC_MSG_RESULT(yes irix5 or irix6.2)
+      ;;
+    *-sgi-irix6*)
+      EXTRADEFS="$EXTRADEFS -DAU_AUDRIV -DSGI_NEWAL"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_al.c"
+      EXTRALIBS="$EXTRASLIBS -laudio"
+      AC_MSG_RESULT(yes irix6)
+      ;;
+    *-*-sunos4*)
+      EXTRADEFS="$EXTRADEFS -DAU_AUDRIV"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_sun.c"
+      AC_MSG_RESULT(yes sunos4)
+      if test -f /usr/demo/SOUND/libaudio.a; then
+	EXTRALIBS="$EXTRALIBS /usr/demo/SOUND/libaudio.a"
+      else
+	AC_MSG_RESULT(Notice: libaudio.a is not found [(ignore)])
+      fi
+      ;;
+    *-*-solaris*)
+      EXTRADEFS="$EXTRADEFS -DAU_AUDRIV"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_sun.c"
+      AC_MSG_RESULT(yes solaris)
+      if test -f /usr/demo/SOUND/lib/libaudio.a; then
+	EXTRALIBS="$EXTRALIBS /usr/demo/SOUND/lib/libaudio.a"
+      else
+	AC_MSG_RESULT(Notice: libaudio.a is not found [(ignore)])
+      fi
+      ;;
+    *-*-netbsd*)
+      EXTRADEFS="$EXTRADEFS -DAU_AUDRIV"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_sun.c"
+      AC_MSG_RESULT(yes netbsd)
+      ;;
+    *-*-cygwin32*)
+      EXTRADEFS="$EXTRADEFS -DAU_WIN32"
+      SYSEXTRAS="$SYSEXTRAS win_a.c"
+      EXTRALIBS="$EXTRALIBS -lwinmm"
+      AC_MSG_RESULT(yes cygnus)
+      ;;
+    *)
+      EXTRADEFS="$EXTRADEFS -DAU_NONE -DAU_AUDRIV"
+      SYSEXTRAS="$SYSEXTRAS audriv_a.c audriv_none.c"
+      AC_MSG_RESULT(no)
+      ;;
+  esac
+else
+  AC_MSG_RESULT(no)
+fi
+
+
+
+dnl Dynamic link configuration
+
+AC_ARG_ENABLE(enable-dynamic,
+  [  --enable-dynamic        Enable dynamic link interface ],
+  [ dnl --enable-dynamic=yes to --enable-dynamic=dynamic
+    test "x$enable_dynamic" = xyes && enable_dynamic=dynamic
+  ])
+
+case "$enable_ncurses$enable_slang$enable_motif$enable_tcltk$enable_emacs$enable_vt100$enable_xaw$enable_xskin$enable_gtk$enable_dynamic" in
+*dynamic*) NEEDDLOPEN=yes;;
+*)         NEEDDLOPEN=no;;
+esac
+
+dnl check -fpic option for gcc
+case "$CC " in "gcc "*) SHCFLAGS="$SHCFLAGS -fPIC";; esac
+case "x$enable_ump" in xyes|xdynamic) EXTRACFLAGS="$EXTRACFLAGS -DXP_UNIX $SHCFLAGS";; esac
+
+if test "$NEEDDLOPEN" = "yes"; then
+  have_dl=no
+
+  WAPI_CHECK_FUNC(LoadLibraryExA,,[LoadLibraryExA(0,0,0);],have_dl=cygwin)
+  test $wapi_cv_func_LoadLibraryExA = yes && have_dl=cygwin
+
+  if test "$have_dl" = "no"; then
+    AC_CHECK_FUNC(shl_load,have_dl=hpux)
+  fi
+  if test "$have_dl" = "no" -a "x$ac_cv_lib_dl_dlopen" = xyes; then
+    have_dl=dlopen
+  fi
+  if test "$have_dl" = "no"; then
+    AC_CHECK_FUNC(dlopen,have_dl=dlopen)
+  fi
+  if test "$have_dl" = "no"; then
+    AC_CHECK_FUNC(dld_init,have_dl=dld)
+  fi
+  if test "$have_dl" = "no"; then
+    AC_CHECK_LIB(dld,dld_init,have_dl=dld;lib_dl_opt=-ldld)
+  fi
+
+  AC_MSG_CHECKING(dynamic link method)
+  case "$have_dl" in
+    dlopen)
+      AC_MSG_RESULT(use dl_dlopen.c)
+      SYSEXTRAS="$SYSEXTRAS dl_dlopen.c"
+      CHECK_DLSYM_UNDERSCORE(EXTRADEFS="$EXTRADEFS -DDLSYM_NEEDS_UNDERSCORE")
+      ;;
+    dld)
+      AC_MSG_RESULT(use dl_dld.c)
+      SYSEXTRAS="$SYSEXTRAS dl_dld.c"
+      ;;
+    hpux)
+      AC_MSG_RESULT(use dl_hpux.c)
+      SYSEXTRAS="$SYSEXTRAS dl_hpux.c"
+      LDFLAGS="$LDFLAGS -Wl,-E $LDFLAGS"
+      ;;
+    cygwin)
+      AC_MSG_RESULT(use dl_cygwin32.c)
+      SYSEXTRAS="$SYSEXTRAS dl_cygwin32.c"
+      ;;
+    *)
+      NEEDDLOPEN="no"
+      AC_MSG_WARN(no method to open a shared object)
+      ;;
+  esac
+fi
+
+if test "$NEEDDLOPEN" = "yes"; then
+  SHARED_LIB_PATH="\$(TIMID_DIR)"
+  MY_DEFINE(IA_DYNAMIC)
+  EXTRADEFS="$EXTRADEFS -DSHARED_LIB_EXT=\\\".$so\\\""
+  EXTRADEFS="$EXTRADEFS -DSHARED_LIB_PATH=\\\"$SHARED_LIB_PATH\\\""
+fi
+AM_CONDITIONAL(NEEDDLOPEN, test "$NEEDDLOPEN" = "yes")
+
+
+
+dnl Select interfaces
+
+dnl ncurses
+AM_CONDITIONAL(ENABLE_NCURSES, false)
+CONFIG_INTERFACE(ncurses,NCURSES,n,
+  [  --enable-ncurses        Enable ncurses interface        (default is no)],
+  [ AC_CHECK_HEADERS(ncurses.h ncurses/curses.h curses.h)
+    AC_CHECK_LIB(ncurses,initscr,lib_curses_opt=-lncurses,
+	[ dnl checking pdcurses
+	  AC_CHECK_LIB(curses,PDC_set_ctrl_break,
+		[ lib_curses_opt=-lcurses
+		  CPPFLAGS="$CPPFLAGS -DUSE_PDCURSES=1"
+		  lib_user32_opt="$lib_user32_test"
+		],
+		[ AC_MSG_WARN(ncurses interface is not enabled) 
+		  enable_ncurses=no
+		],
+		$lib_user32_test)
+	])
+  ],
+  [ LIBS="$LIBS $lib_curses_opt"
+    case "$target" in
+      *-*-freebsd*)
+        EXTRALIBS="$EXTRALIBS -lmytinfo"
+        ;;
+    esac ],
+  [ n_so_libs="$lib_curses_opt"
+    case "$target" in
+      *-*-freebsd*)
+        n_so_libs="$n_so_libs -lmytinfo"
+        ;;
+    esac ])
+
+
+
+dnl slang
+AM_CONDITIONAL(ENABLE_SLANG, false)
+CONFIG_INTERFACE(slang,SLANG,s,
+  [  --enable-slang          Enable slang interface          (default is no)],
+  [ KEEPLIBS=$LIBS
+    AC_CHECK_LIB(slang,SLang_init_tty,,enable_slang=no)
+    AC_CHECK_HEADERS(slang/slang.h)
+    LIBS=$KEEPLIBS
+  ],
+  [ LIBS="$LIBS -lslang" ],
+  [ s_so_libs="-lslang"
+    AC_CHECK_LIB(termcap,initscr,s_so_libs="$s_so_libs -ltermcap")
+  ])
+
+
+
+dnl Motif
+AM_CONDITIONAL(ENABLE_MOTIF, false)
+CONFIG_INTERFACE(motif,MOTIF,m,
+  [  --enable-motif          Enable motif interface          (default is no)],
+  [ if test "x$with_x" != xyes; then
+        AC_MSG_ERROR(motif: --with-x option must be specified)
+    fi
+    if test "$have_xm" != "yes"; then
+      AC_MSG_WARN(Motif library is not found.)
+      enable_motif=no
+    fi ],
+  [ lib_xm_opt=-lXm
+    lib_xt_opt=-lXt
+    if test "$have_xprelibs" = "yes"; then
+	lib_xprelibs_opt='-lXext -lSM -lICE'
+    fi
+  ],
+  [ if test x$have_xprelibs = xyes; then
+      m_so_libs="-lXext -lSM -lICE"
+    fi
+    m_so_libs="$ldflags_x_opt -lXm -lXt $m_so_libs -lX11"
+  ])
+
+
+dnl Tcl/Tk
+AM_CONDITIONAL(ENABLE_TCLTK, false)
+CONFIG_INTERFACE(tcltk,TCLTK,k,
+  [  --enable-tcltk          Enable tcltk interface          (default is no)],
+  [ if test "x$with_x" != xyes; then
+        AC_MSG_ERROR(tcltk: --with-x option must be specified)
+    fi
+
+    dnl save flags
+    KEEPCPPFLAGS=$CPPFLAGS
+    KEEPLDFLAGS=$LDFLAGS
+    KEEPLIBS=$LIBS
+
+    CPPFLAGS="$tcl_include_dir $tk_includes $CPPFLAGS"
+    LDFLAGS="$tcl_libdir $tk_libdir $LDFLAGS"
+    LIBS="$LIBS $lib_dl_opt"
+
+    tcl_lib=
+    tk_lib=
+    for l in tcl tcl8.0jp tcl7.6jp tcl80jp tcl76jp tcl8.0 tcl7.6 tcl80 tcl76; do
+      case "x$tcl_lib" in x) AC_CHECK_LIB($l,Tcl_Init,tcl_lib=-l$l);; esac
+    done
+    LIBS="$LIBS $tcl_lib"
+    for l in tk tk8.0jp tk4.2jp tk80jp tk42jp tk8.0 tk4.2 tk80 tk42; do
+      case "x$tk_lib" in x) AC_CHECK_LIB($l,Tk_Init,tk_lib=-l$l);; esac
+    done
+
+    LIBS=$KEEPLIBS
+    if test "x$tcl_lib" = x -o "x$tk_lib" = x; then
+      CPPFLAGS=$KEEPCPPFLAGS
+      LDFLAGS=$KEEPLDFLAGS
+      enable_tcltk=no
+      AC_MSG_WARN(tcl/tk is not enable)
+    else
+      tcltk_dep='tclIndex'
+    fi
+  ],
+  [ LIBS=`echo $LIBS | sed "s/-lX11/$tk_lib $tcl_lib -lX11/"`
+    EXTRADEFS="$EXTRADEFS -DTKPROGPATH=\\\"\$(TCL_DIR)/tkmidity.tcl\\\""
+    case "$target" in
+      *-*-bsdi*)
+        EXTRALIBS="$EXTRALIBS -lipc"
+        ;;
+    esac ],
+  [ EXTRADEFS="$EXTRADEFS -DTKPROGPATH=\\\"\$(TCL_DIR)/tkmidity.tcl\\\""
+    k_so_libs="$tcl_libdir $tk_libdir $tcl_lib $tk_lib $lib_dl_opt"
+    case "$target" in
+      *-*-bsdi*)
+        k_so_libs="$k_so_libs -lipc"
+        ;;
+    esac
+    k_so_libs="$k_so_libs -lX11 -lm"
+    ])
+AM_CONDITIONAL(ENABLE_DYNAMIC_TCLTK, test "x$enable_tcltk" = "xdynamic")
+
+
+dnl Emacs
+AM_CONDITIONAL(ENABLE_EMACS, false)
+CONFIG_INTERFACE(emacs,EMACS,e,
+  [  --enable-emacs          Enable emacs interface          (default is no)],
+  ,
+  [ ELFILES="$ELFILES timidity.el" ],
+  [ ELFILES="$ELFILES timidity.el" ])
+
+
+dnl VT100
+AM_CONDITIONAL(ENABLE_VT100, false)
+CONFIG_INTERFACE(vt100,VT100,T,
+  [  --enable-vt100          Enable VT100 interface          (default is no)])
+
+
+dnl X Athena Widget
+AM_CONDITIONAL(ENABLE_XAW, false)
+CONFIG_INTERFACE(xaw,XAW,a,
+  [  --enable-xaw            Enable athena interface         (default is no)],
+  [ if test "x$with_x" != xyes; then
+        AC_MSG_ERROR(xaw: --with-x option must be specified)
+    fi
+    if test "x$have_xaw" != "xyes" -a "x$have_xaw" != "x3d"; then
+      AC_MSG_WARN(X Athena Widget library is not found.)
+      enable_xaw=no
+    fi ],
+  [ dnl Add -lXext -lSM -lICE -lXmu -lXt {-lXaw|-lXaw3d}
+    if test "$have_xext" = "yes"; then
+      lib_xext_opt=-lXext
+    fi
+    if test "$have_xprelibs" = "yes"; then
+      lib_xprelibs_opt='-lSM -lICE'
+    fi
+    lib_xmu_opt=-lXmu
+    lib_xt_opt=-lXt
+    if test "$have_xaw" = "3d"; then
+      EXTRADEFS="$EXTRADEFS -DXAW3D"
+      lib_xaw_opt=-lXaw3d
+    else
+      lib_xaw_opt=-lXaw
+    fi
+  ],
+  [ if test "$have_xext" = "yes"; then
+      a_so_libs="-lXext -lX11"
+    else
+      a_so_libs="-lX11"
+    fi
+    if test "$have_xprelibs" = "yes"; then
+      a_so_libs="-lSM -lICE $a_so_libs"
+    fi
+    if test "$have_xaw" = "yes"; then
+      a_so_libs="-lXaw -lXmu -lXt $a_so_libs"
+    elif test "$have_xaw" = "3d"; then
+      EXTRADEFS="$EXTRADEFS -DXAW3D"
+      a_so_libs="-lXaw3d -lXmu -lXt $a_so_libs"
+    fi
+    a_so_libs="$ldflags_x_opt $a_so_libs"
+  ])
+AM_CONDITIONAL(ENABLE_DYNAMIC_XAW, test "x$enable_xaw" = "xdynamic")
+
+
+dnl X skin
+AM_CONDITIONAL(ENABLE_XSKIN, false)
+CONFIG_INTERFACE(xskin,XSKIN,i,
+  [  --enable-xskin          Enable X skin interface         (default is no)],
+  [ if test "x$with_x" != xyes; then
+        AC_MSG_ERROR(xskin: --with-x option must be specified)
+    fi],
+  ,
+  [i_so_libs="$ldflags_x_opt -lX11"])
+
+
+dnl GTK+ 
+AM_CONDITIONAL(ENABLE_GTK, false)
+CONFIG_INTERFACE(gtk, GTK, g,
+  [  --enable-gtk            Enable GTK+ interface           (default is no)],
+  [ AM_PATH_GTK(1.1.3,,enable_gtk=no) ],
+  [ LIBS="$LIBS $GTK_LIBS"
+    EXTRACT_CPPFLAGS(CPPFLAGS,CFLAGS,$GTK_CFLAGS) ],
+  [ g_so_libs="$GTK_LIBS"
+    EXTRACT_CPPFLAGS(CPPFLAGS,CFLAGS,$GTK_CFLAGS) ])
+
+
+dnl UMP configuration
+CONFIG_INTERFACE(ump, PLUGIN, p,
+  [  --enable-ump            UMP configuration               (default is no)],
+  [ if test ! -d ump; then
+	AC_MSG_ERROR(UMP Package is not exists.  Can't configure it.)
+    fi
+    AC_CHECK_HEADER(X11/xpm.h,,AC_MSG_ERROR([UMP Package needs xpm.h[,] but could not find it.]))
+    AC_CHECK_LIB(Xpm,XpmCreatePixmapFromData,:,AC_MSG_ERROR([UMP Package needs libXpm.a[,] but could not find it.]))
+    if test "$have_xext" = "yes"; then
+      lib_xext_opt=-lXext
+    fi
+    if test "$have_xprelibs" = "yes"; then
+      lib_xprelibs_opt='-lSM -lICE'
+    fi
+    lib_xmu_opt=-lXmu
+    lib_xt_opt=-lXt
+  ])
+
+
+dnl Offix support
+dnl this rely on  CFLAGS and LIBS
+AC_ARG_ENABLE(offix,
+  [  --enable-offix          Enable offix support            (default is no)],
+  [ if test "$enableval" = "yes"; then
+      KEEPCPPFLAGS=$CPPFLAGS
+      KEEPLIBS=$LIBS
+      KEEPLDFLAGS=$LDFLAGS
+      CPPFLAGS="$CPPFLAGS $offix_include_dir"
+      LDFLAGS="$LDFLAGS $offix_lib_dir"
+      LIBS="$LIBS $lib_xmu_opt $lib_xt_opt $lib_xprelibs_opt $lib_xext_opt -lX11"
+      AC_CHECK_LIB(Dnd,DndInitialize,[
+	LIBS=$KEEPLIBS
+        LIBS="$LIBS -lDnd"
+        EXTRADEFS="$EXTRADEFS -DOFFIX"
+      ],
+      [ LDFLAGS=$KEEPLDFLAGS
+        CPPFLAGS=$KEEPCPPFLAGS
+	LIBS=$KEEPLIBS
+      ])
+    fi
+  ]
+)
+
+dnl Network selection
+AC_ARG_ENABLE(network,
+  [  --enable-network        Enable network support          (default is no)],
+  [ if test "$enableval" = "yes"; then
+      EXTRADEFS="$EXTRADEFS -DSUPPORT_SOCKET"
+    fi ])
+AM_CONDITIONAL(ENABLE_NETWORK, test "x$enable_network" = "xyes")
+
+dnl Sound Spectrogram Viewer
+AC_ARG_ENABLE(spectrogram,
+  [  --enable-spectrogram    Enable Sound Spectrogram Viewer (default is no)],
+  [ if test "$enableval" = "yes"; then
+      if test "x$with_x" != xyes; then
+	AC_MSG_ERROR(spectrogram: --with-x option must be specified)
+      fi
+      EXTRADEFS="$EXTRADEFS -DSUPPORT_SOUNDSPEC"
+    fi ])
+AM_CONDITIONAL(ENABLE_SOUND_SPEC, test "x$enable_spectrogram" = "xyes")
+
+dnl WRD interface
+AC_ARG_ENABLE(wrd,
+  [  --enable-wrd            Enable WRD interface for X      (default is no)],
+  [ if test "$enableval" = "yes"; then
+      if test "x$with_x" != xyes; then
+	AC_MSG_ERROR(wrd: --with-x option must be specified)
+      fi
+      EXTRADEFS="$EXTRADEFS -DWRDT_X"
+    fi ])
+AM_CONDITIONAL(ENABLE_WRD, test "x$enable_wrd" = "xyes")
+
+
+
+dnl Move -I* in CFLAGS to CPPFLAGS.
+dnl It comes from 
+
+
+AM_CONDITIONAL(CYGNUS, test "x$CYGNUS" = xyes)
+AM_CONDITIONAL(W32READDIR, test "x$W32READDIR" = "xyes")
+
+SET_UNIQ_WORDS(LDFLAGS,$LDFLAGS)
+SET_UNIQ_WORDS(SHLDFLAGS,$SHLDFLAGS)
+SET_UNIQ_WORDS(CFLAGS,$EXTRACFLAGS $CFLAGS)
+SET_UNIQ_WORDS(CPPFLAGS,$CPPFLAGS)
+
+if test "x$with_x" = xyes; then
+  dnl Order of X-library is: -lXm -lXaw -lXmu -lXt -lSM -lICE -lXext -lX11
+  LIBS=`echo $LIBS | sed "s/-lX11/$lib_xm_opt $lib_xaw_opt $lib_xmu_opt $lib_xt_opt $lib_xprelibs_opt $lib_xext_opt -lX11/"`
+fi
+LIBS="$LIBS $lib_dl_opt $lib_user32_opt"
+SHLD="$SHLD $SHLDFLAGS"
+
+AC_SUBST(SYSEXTRAS)
+AC_SUBST(EXTRALIBS)
+AC_SUBST(EXTRADEFS)
+AC_SUBST(NETSRCS)
+AC_SUBST(ELFILES)
+AC_SUBST(SHLD)
+AC_SUBST(SHCFLAGS)
+AC_SUBST(dynamic_targets)
+AC_SUBST(so)
+AC_SUBST(LN_S)
+AC_SUBST(WISH)
+AC_SUBST(tcltk_dep)
+AC_SUBST(program_transform_name)
+
+AC_OUTPUT([
+Makefile
+common.makefile
+interface/Makefile
+interface/motif_bitmaps/Makefile
+interface/bitmaps/Makefile
+interface/pixmaps/Makefile
+libarc/Makefile
+timidity/Makefile
+utils/Makefile
+doc/Makefile
+doc/C/Makefile
+doc/ja_JP.ujis/Makefile])

@@ -1,0 +1,54 @@
+# TiMidity++ -- MIDI to WAVE converter and player
+# Copyright (C) 1999 Masanao Izumo <mo@goice.co.jp>
+# Copyright (C) 1995 Tuukka Toivonen <tt@cgs.fi>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+# Define follows if you want to change.
+
+#SHELL=/bin/sh
+
+
+## Package compilations:
+#CC= @CC@
+#CFLAGS = @CFLAGS@
+CPPFLAGS = @CPPFLAGS@ @EXTRADEFS@ -DDEFAULT_PATH=\"$(TIMID_DIR)\"
+#DEFS = @DEFS@
+#LDFLAGS = @LDFLAGS@
+LIBS = @LIBS@ @EXTRALIBS@
+SHLD = @SHLD@
+SHCFLAGS = @SHCFLAGS@
+#@SET_MAKE@
+
+
+## Package installations:
+#prefix = @prefix@
+#exec_prefix = @exec_prefix@
+#bindir = @bindir@
+#libdir = @libdir@
+#mandir = @mandir@
+pkglibdir = $(libdir)/timidity
+#INSTALL = @INSTALL@
+
+# Where to install the patches, config files, and MIDI files.
+# If you change this, it's a good idea to recompile the binary,
+# or you'll need to invoke timidity with the -L option.
+TIMID_DIR = $(pkglibdir)
+
+# Where to install the Tcl code, if you use the Tcl code that is.
+TCL_DIR = $(pkglibdir)
+
+
+.SUFFIXES: .c .h .ptcl .tcl .o .1 .txt .ps .@so@

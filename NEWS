@@ -1,0 +1,85 @@
+* 4/6, 1999
+    Released TiMidity++ v1.3.8.
+    * Fixed some bugs or probrems.
+
+* 3/30, 1999
+    Released TiMidity++ v1.3.7.
+    * Fixed some bugs or probrems.
+    * In GTK interface, enabled to delete loaded files from the play list.
+
+* 3/23, 1999
+    Released TiMidity++ v1.3.6.
+    * In XAW interface, added new user interfaces.
+
+* 3/8, 1999
+    Released TiMidity++ v1.3.5.
+    * In XAW interface, added new user interfaces.
+
+* 3/1, 1999
+    Released TiMidity++ v1.3.4.
+    * Fixed some bugs and probrems.
+    * Added a new WM-icon for GTK.
+
+* 2/24, 1999
+    Released TiMidity++ v1.3.3.
+    * Improve XAW interface.
+    * Fixed some bugs and probrems.
+
+* 2/10, 1999
+    Released TiMidity++ v1.3.2.
+    * Fixed some bugs and probrems.
+    * Changed icons of motif interface.
+    * Changed sorting algorithm for xaw and tcktl interface.
+
+* 2/5, 1999
+    Released TiMidity++ v1.3.1.
+    * Fixed some bugs.
+    * Enabled compile with gcc from MINGW32.
+
+* 2/3, 1999
+    Released TiMidity++ v1.3.0.
+    New features and major change from v1.2.x:
+    * Enabled to configure & compile on cygnus.
+    * Improved XAW interface for trace playing.
+    * Improved reverb sounds.
+    * Fixed MIME/Multipart bug.
+
+* 1/25, 1999
+    Released TiMidity++ v1.2.1.
+    Added missing files.
+    Fixed some configuration probrems.
+    Added --enable-dynamic configure option.
+
+* 1/21, 1999
+    Released TiMidity++ v1.2.0.
+    New features and major change from v1.1.x:
+    * XAW interface:
+      - Changed button bitmap of random & repeat
+      - Modified some implementations.
+    * Gtk interface:
+      - Added buttons (& implementation) for raising & lowering the pitch.
+      - Added buttons (& implementation) for increasing/decreasing the tempo.
+    * Lookup TIMIDITY_SOUND_CARD and TIMIDITY_PCM_DEVICE environment variable
+      to select the PCM device of ALSA.
+    * Added interface.h to define IA_* macro for TiMidity interface.  This
+      file is generated automatically by configure.
+
+* 1/18, 1999
+    Released TiMidity++ v1.1.1.
+    v1.1.0 had configuration probrems, so v1.1.1 was released immediately.
+    Fixed some configure bugs.
+    Modified that xaw interface is enable to run without any midi files.
+
+* 1/18, 1999
+    Released TiMidity++ v1.1.0.
+    Support OffiX file drag & drop interface for xaw.
+    Support UMP configuration.
+
+* 1/14, 1999
+    Released TiMidity++ v1.0.1.
+    Modfied for OffiX file drag & drop interface for xaw.  If you want
+    build this, define OFFIX in interface/xaw.h and link libDnd.
+
+* 1/6, 1999
+    Released TiMidity++ v1.0.0.
+    See `ChangeLog' for major changes from the original of TiMidity 0.2i
