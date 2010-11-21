@@ -25,10 +25,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#if !defined(__WIN32__)
 #include <unistd.h>
+#endif
 #include <fcntl.h>
+#include <getopt.h>
 
-#ifdef SOLARIS
+#if defined(SOLARIS) || defined(__WIN32__)
 #include <string.h>
 #else
 #include <strings.h>
