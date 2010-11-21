@@ -25,6 +25,7 @@
 
 #ifdef __WIN32__
 #include <stdlib.h>
+#include <stdio.h>
 #include <io.h>
 #include <string.h>
 #else
