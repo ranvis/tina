@@ -259,7 +259,7 @@ int main(int argc, char **argv)
   point += 10;
   
   /* description */
-  strcpy(point, "Copyleft 1995 EWE&U Conductions and one Retreated Gravi\032");
+  strcpy((char *)point, "Copyleft 1995 EWE&U Conductions and one Retreated Gravi\032");
   point += 60;
 
   pound(1); /* instruments */
@@ -271,7 +271,7 @@ int main(int argc, char **argv)
   bounce(36); /* reserved */
 
   pounds(1); /* instrument # */
-  strcpy(point, "Bleahnoise"); /* instrument name */
+  strcpy((char *)point, "Bleahnoise"); /* instrument name */
   point += 16;
   poundl(datasize); /* instrument size */
   pound(1); /* layers */
@@ -283,7 +283,7 @@ int main(int argc, char **argv)
   pound(1); /* samples */
   bounce(40); /* reserved */
   
-  strcpy(point, "bleah"); /* wave name */
+  strcpy((char *)point, "bleah"); /* wave name */
   point += 7;
   pound(0); /* fractions */
   poundl(datasize); /* wave size */
