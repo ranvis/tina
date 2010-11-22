@@ -57,7 +57,7 @@ PlayMode dpm = {
 
 /* Max audio blocks waiting to be played */
 
-static LPHWAVEOUT dev;
+static HWAVEOUT dev;
 static int nBlocks;
 
 extern CRITICAL_SECTION critSect;
@@ -176,7 +176,7 @@ static int open_output (void)
 	pcm.wf.nBlockAlign = j;
 	pcm.wBitsPerSample = eight_bit ? 8 : 16;
 
-	res = waveOutOpen (NULL, 0, (LPWAVEFORMAT)&pcm, NULL, 0, WAVE_FORMAT_QUERY);
+	res = waveOutOpen (NULL, 0, (LPWAVEFORMAT)&pcm, 0, 0, WAVE_FORMAT_QUERY);
 	if (res)
 		{
 		ctl->cmsg (CMSG_ERROR, VERB_NORMAL, "Format not supported!");
